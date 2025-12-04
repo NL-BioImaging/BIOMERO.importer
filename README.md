@@ -1,6 +1,6 @@
 # BIOMERO.importer - Automated Data Import System
 
-> **Note:** This system was formerly known as "OMERO Automated Data Import (ADI)". The new canonical name is **BIOMERO.importer** as part of the BIOMERO 2.0 ecosystem.
+> 🚀 **This package is part of BIOMERO 2.0** — For complete deployment and FAIR infrastructure setup, start with the [**NL-BIOMERO Documentation**](https://nl-bioimaging.github.io/NL-BIOMERO/) 📖
 
 The BIOMERO.importer system enables automated uploading of image data from microscope workstations to an OMERO server. BIOMERO.importer is a database-driven system that polls a PostgreSQL database for new import orders and processes them automatically, including the option of running preprocessing containers for e.g. file conversion or pyramid creation.
 
