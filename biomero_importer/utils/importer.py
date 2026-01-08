@@ -489,13 +489,15 @@ class DataPackageImporter:
     @connection
     def import_zarr(self, conn, uri, target, target_by_name=None, endpoint=None, nosignrequest=False):
         # Using https://github.com/BioNGFF/omero-import-utils/blob/main/metadata/register.py
-        from .register import load_attrs, register_image, register_plate, link_to_target, validate_endpoint
+        from .register import (load_attrs, register_image, register_plate, link_to_target, validate_endpoint,
+                               get_omexml_bytes, full_import, parse_image_metadata, set_rendering_settings,
+                               set_external_info)
         import zarr
         from types import SimpleNamespace
 
         file_title = os.path.splitext(os.path.basename(uri))[0].rstrip('.ome')
         args = SimpleNamespace(uri=uri, endpoint=endpoint, name=file_title,
-                               nosignrequest=nosignrequest, target=target, target_by_name=target_by_name)
+                               nosignrequest=nosignrequest, target=str(target), target_by_name=target_by_name)
 
         # --- start copy from register.main() ---
 
@@ -524,16 +526,43 @@ class DataPackageImporter:
         else:
             if "bioformats2raw.layout" in zattrs and zattrs["bioformats2raw.layout"] == 3:
                 print("Registering: bioformats2raw.layout")
-                series = 0
-                series_exists = True
-                while series_exists:
-                    try:
-                        print("Checking for series:", series)
-                        obj = register_image(conn, store, args, None, image_path=str(series))
-                        objs.append(obj)
-                    except FileNotFoundError:
-                        series_exists = False
-                    series += 1
+                zarr_name = args.uri.rstrip("/").split("/")[-1]
+                if args.name:
+                    zarr_name = args.name
+                # try to load OME/METADATA.ome.xml
+                omexml_bytes = get_omexml_bytes(store)
+                if omexml_bytes is not None:
+                    print("Importing OME/METADATA.ome.xml")
+                    rsp = full_import(conn.c, omexml_bytes, args.wait)
+                    for series, p in enumerate(rsp.pixels):
+                        # set external info. NB: order of pixels MUST match the series 0, 1, 2...
+                        image = conn.getObject("Image", p.image.id.val)
+                        image_path = str(series)
+                        image_attrs = load_attrs(store, image_path)
+                        # pixels_type is only used if we have *incomplete* `omero` metadata
+                        sizes, pixel_size, pixels_type = parse_image_metadata(store, image_attrs, image_path)
+                        rnd_def = set_rendering_settings(conn, image, image_attrs, pixels_type)
+                        if rnd_def is not None:
+                            conn.getUpdateService().saveAndReturnObject(rnd_def)
+                        set_external_info(image._obj, args, image_path=image_path)
+                        # default name is METADATA.ome.xml [series], based on clientPath?
+                        new_name = image.name.replace("METADATA.ome.xml", zarr_name)
+                        print("Imported Image:", image.id, new_name)
+                        image.setName(new_name)
+                        image.save()  # save Name and ExternalInfo
+                        objs.append(image)
+                else:
+                    print("OME/METADATA.ome.xml Not Found")
+                    series = 0
+                    series_exists = True
+                    while series_exists:
+                        try:
+                            print("Checking for series:", series)
+                            obj = register_image(conn, store, args, None, image_path=str(series))
+                            objs.append(obj)
+                        except FileNotFoundError:
+                            series_exists = False
+                        series += 1
             else:
                 print("Registering: Image")
                 objs = [register_image(conn, store, args, zattrs)]
