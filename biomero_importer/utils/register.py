@@ -403,14 +403,23 @@ def set_rendering_settings(conn, image, image_attrs, pixels_type, families=None,
     return rnd_def
 
 
+def create_length(value_unit):
+    if len(value_unit) > 1 and value_unit[1]:
+        try:
+            return LengthI(value_unit[0], value_unit[1].upper())
+        except:
+            pass
+    return LengthI(value_unit[0])
+
+
 def set_pixel_size(image, pixel_size):
     pixels = image.getPrimaryPixels()._obj
     if "x" in pixel_size:
-        pixels.setPhysicalSizeX(LengthI(pixel_size["x"][0], pixel_size["x"][1].upper()))
+        pixels.setPhysicalSizeX(create_length(pixel_size["x"]))
     if "y" in pixel_size:
-        pixels.setPhysicalSizeY(LengthI(pixel_size["y"][0], pixel_size["y"][1].upper()))
+        pixels.setPhysicalSizeY(create_length(pixel_size["y"]))
     if "z" in pixel_size:
-        pixels.setPhysicalSizeZ(LengthI(pixel_size["z"][0], pixel_size["z"][1].upper()))
+        pixels.setPhysicalSizeZ(create_length(pixel_size["z"]))
 
 
 def load_families(query_service):
