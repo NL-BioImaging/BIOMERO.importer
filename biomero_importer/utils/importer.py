@@ -899,7 +899,7 @@ class DataPackageImporter:
             
             # Add the full order_info for complete traceability
             order_info = self.data_package
-            
+
             # Core order metadata
             core_fields = ['Group', 'Username', 'DestinationID', 'DestinationType', 'Files', 'FileNames']
             for field in core_fields:
@@ -912,12 +912,16 @@ class DataPackageImporter:
                         annotation_dict[field] = str(order_info[field])
                     else:
                         annotation_dict[field] = str(order_info[field])
-            
+
+            local_path = order_info.get(PREPROC_RESULTS_KEY, [{}])[0].get(PREPROC_RESULT_LOCAL_FULL)
+            if local_path:
+                annotation_dict['Imported_from'] = str(local_path)
+
             # Add preprocessing metadata if available
             preprocessing_fields = [key for key in order_info.keys() if key.startswith('preprocessing_')]
             for field in preprocessing_fields:
                 annotation_dict[field] = str(order_info[field])
-                
+
             # Add preprocessing ID if available
             if '_preprocessing_id' in order_info:
                 annotation_dict['preprocessing_id'] = str(order_info['_preprocessing_id'])
