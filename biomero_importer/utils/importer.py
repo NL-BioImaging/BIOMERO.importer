@@ -334,41 +334,29 @@ class DataProcessor:
                             )
                         )
 
-                    # Rename decision based on output: compare filename base (handling multi-suffix like .ome.tiff) vs returned name
-                    if name and (full_path or alt_path):
+                    # Rename decision based on output: use the container's full name choice for OMERO
+                    if name and name.strip() and (full_path or alt_path) and local_alt:
                         file_for_ext = full_path or alt_path
                         fname = os.path.basename(file_for_ext)
-                        suffixes = PurePath(fname).suffixes  # e.g. ['.ome', '.tiff']
-                        ext_combo = ''.join(suffixes)
-                        if ext_combo:
-                            base_no_ext = fname[:-len(ext_combo)]
-                        else:
-                            base_no_ext = os.path.splitext(fname)[0]
-
-                        desired_base = str(name)
-                        # If desired name already contains the same extension combo, keep it; else append.
-                        if desired_base.endswith(ext_combo):
-                            desired_name_with_ext = desired_base
-                            desired_base_only = desired_base[: -len(ext_combo)] if ext_combo else desired_base
-                        else:
-                            desired_name_with_ext = f"{desired_base}{ext_combo}"
-                            desired_base_only = desired_base
-
-                        if desired_base_only != base_no_ext and local_alt:
-                            # Store map keyed by the actual local path used for import, value includes extension
+                        desired_name = str(name).strip()
+                        
+                        # Only rename if the desired name is different from the current filename
+                        if desired_name != fname:
+                            # Store map keyed by the actual local path used for import
+                            # The container has full control over the OMERO name (including extensions)
                             rename_map = (
                                 self.data_package.get(
                                     PREPROC_RENAME_MAP_KEY, {}
                                 )
                                 or {}
                             )
-                            rename_map[str(local_alt)] = desired_name_with_ext
+                            rename_map[str(local_alt)] = desired_name
                             self.data_package[PREPROC_RENAME_MAP_KEY] = rename_map
                             self.logger.debug(
                                 (
-                                    "Rename needed: base vs name differ; "
-                                    f"base='{base_no_ext}', name='{desired_base_only}', ext='{ext_combo}'. "
-                                    f"Recorded rename for {local_alt} -> '{desired_name_with_ext}'"
+                                    "Rename needed: container specified different name; "
+                                    f"original='{fname}', desired='{desired_name}'. "
+                                    f"Recorded rename for {local_alt} -> '{desired_name}'"
                                 )
                             )
 
@@ -873,8 +861,9 @@ class DataPackageImporter:
 
     @connection
     def rename_image_if_needed(self, conn, image_id, local_path):
-        """Rename Image 1:1 to the preprocessor 'name' using local output path.
+        """Rename Image to the full name specified by the preprocessor container.
 
+        The container has full control over the OMERO name, including extensions.
         Looks up PREPROC_RENAME_MAP_KEY by the processed local path used for import.
         Returns True if renamed, else False.
         """
