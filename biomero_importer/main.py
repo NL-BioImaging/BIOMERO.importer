@@ -21,7 +21,8 @@ from .utils.ingest_tracker import (
     STAGE_NEW_ORDER,
     STAGE_INGEST_STARTED,
     STAGE_INGEST_FAILED,
-    STAGE_IMPORTED
+    STAGE_IMPORTED,
+    _mask_url,
 )
 from .utils.ingest_tracker import IngestionTracking, Base, get_ingest_tracker
 from .db_migrate import run_migrations_on_startup
@@ -211,7 +212,16 @@ class DatabasePoller:
         self.ingest_tracker = get_ingest_tracker()  # global instance
         self.IngestionTracking = IngestionTracking
 
-        self.logger.debug(f"Poller ready: {self.__dict__}")
+        # Log poller state without leaking credentials
+        safe_state = {
+            k: (
+                {ck: (_mask_url(cv) if 'db' in ck else cv)
+                 for ck, cv in v.items()}
+                if isinstance(v, dict) else v
+            )
+            for k, v in self.__dict__.items()
+        }
+        self.logger.debug(f"Poller ready: {safe_state}")
 
         # Ensure tables exist
         Base.metadata.create_all(self.ingest_tracker.engine)

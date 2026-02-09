@@ -190,7 +190,9 @@ class IngestTracker:
 
             self.engine = create_engine(
                 self.database_url,
-                connect_args=connect_args
+                connect_args=connect_args,
+                pool_pre_ping=True,
+                pool_recycle=1800,
             )
             self.Session = sessionmaker(bind=self.engine)
 
@@ -339,7 +341,8 @@ class IngestTracker:
                     self.logger.debug(
                         f"Created database entry: {new_entry.id}")
                     return new_entry.id
-            except (SQLAlchemyError, psycopg2.OperationalError) as e:
+            except (SQLAlchemyError, psycopg2.OperationalError,
+                    psycopg2.DatabaseError) as e:
                 error_msg = str(e).lower()
                 is_connection_issue = any(phrase in error_msg for phrase in [
                     "closed the connection",
@@ -347,21 +350,33 @@ class IngestTracker:
                     "connection refused",
                     "could not connect",
                     "network is unreachable",
-                    "timeout expired"
+                    "timeout expired",
+                    "pgres_tuples_ok",
+                    "does not return rows",
+                    "server closed the connection",
+                    "connection already closed",
+                    "ssl connection has been closed",
                 ])
                 
                 if is_connection_issue and attempt < max_retries - 1:
                     wait_time = 0.5 * (2 ** attempt)  # Exponential backoff
-                    self.logger.warning(f"Database connection issue (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                    self.logger.warning(
+                        f"Database connection issue "
+                        f"(attempt {attempt + 1}/{max_retries}), "
+                        f"retrying in {wait_time}s: {e}"
+                    )
                     time.sleep(wait_time)
                     continue
                 elif is_connection_issue:
-                    self.logger.warning(f"Database connection persistently failing after {max_retries} attempts: {e}")
+                    self.logger.warning(
+                        f"Database connection persistently failing "
+                        f"after {max_retries} attempts: {e}"
+                    )
                 else:
                     self.logger.error(
                         f"Database error logging ingestion step: {e}",
                         exc_info=True,
-                )
+                    )
                 return None
             except Exception as e:
                 self.logger.error(

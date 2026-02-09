@@ -23,8 +23,20 @@ ImportControl = import_module("omero.plugins.import").ImportControl
 
 MAX_RETRIES = 5  # Maximum number of retries
 RETRY_DELAY = 5  # Delay between retries (in seconds)
+IMPORT_MAX_RETRIES = 3  # Maximum retries for transient import errors (e.g. Ice race conditions)
+IMPORT_RETRY_DELAY = 10  # Delay between import retries (in seconds)
 TMP_OUTPUT_FOLDER = "OMERO_inplace"
 PROCESSED_DATA_FOLDER = ".processed"
+
+# Error patterns that indicate a transient/retryable import failure
+# (e.g. concurrent Ice session race conditions)
+RETRYABLE_IMPORT_ERRORS = [
+    'Ice.ObjectNotExistException',
+    'INTERNAL_EXCEPTION',
+    'Ice.ConnectionLostException',
+    'Ice.ConnectionRefusedException',
+    'Ice.TimeoutException',
+]
 
 # Canonical keys for storing preprocessing artifacts on the data_package
 PREPROC_META_KEY = "_preprocessing_metadata"
@@ -43,6 +55,39 @@ def get_tmp_output_path(data_package):
     Helper function to generate the temporary output folder path.
     """
     return os.path.join("/OMERO", TMP_OUTPUT_FOLDER, data_package.get('UUID'))
+
+
+def is_retryable_import_error(errs_file, logger=None):
+    """
+    Check if an import error file contains a retryable (transient) error.
+
+    Reads the .errs file produced by the OMERO CLI import and checks for
+    known transient error patterns (e.g. Ice.ObjectNotExistException from
+    concurrent import race conditions).
+
+    Returns (True, matched_pattern) if retryable, (False, None) otherwise.
+    """
+    if not os.path.exists(errs_file):
+        if logger:
+            logger.warning(
+                f"No .errs file found at {errs_file} — import likely crashed "
+                f"before writing output. Treating as retryable."
+            )
+        return True, "no_errs_file"
+    try:
+        with open(errs_file, 'r') as f:
+            content = f.read()
+        for pattern in RETRYABLE_IMPORT_ERRORS:
+            if pattern in content:
+                if logger:
+                    logger.warning(
+                        f"Retryable error detected in {errs_file}: {pattern}"
+                    )
+                return True, pattern
+    except Exception as e:
+        if logger:
+            logger.warning(f"Could not read errs file {errs_file}: {e}")
+    return False, None
 
 
 def connection(func):
@@ -421,7 +466,8 @@ class DataPackageImporter:
         self.imported = False
 
     @connection
-    def import_to_omero(self, conn, file_path, target_id, target_type, uuid, transfer_type="ln_s", depth=None):
+    def import_to_omero(self, conn, file_path, target_id, target_type, uuid, transfer_type="ln_s", depth=None, log_id=None):
+        log_id = log_id or uuid
         self.logger.debug(
             f"Starting import to OMERO for file: {file_path}, Target: {target_id} ({target_type})")
         cli = CLI()
@@ -434,8 +480,8 @@ class DataPackageImporter:
             '-p', str(conn.port),
             f'--transfer={transfer_type}',
             '--no-upgrade',
-            '--file', f"logs/cli.{uuid}.logs",
-            '--errs', f"logs/cli.{uuid}.errs",
+            '--file', f"logs/cli.{log_id}.logs",
+            '--errs', f"logs/cli.{log_id}.errs",
         ]
         if 'parallel_upload_per_worker' in self.config:
             arguments += ['--parallel-upload',
@@ -631,7 +677,7 @@ class DataPackageImporter:
         return [], template_prefixes  # Return format consistent with get_plate_ids
 
     @connection
-    def import_dataset(self, conn, target, dataset, transfer="ln_s", depth=None):
+    def import_dataset(self, conn, target, dataset, transfer="ln_s", depth=None, file_index=None):
         kwargs = {"transfer": transfer}
         if 'parallel_upload_per_worker' in self.config:
             kwargs['parallel-upload'] = str(
@@ -644,18 +690,49 @@ class DataPackageImporter:
         if depth:
             kwargs['depth'] = str(depth)
         uuid = self.data_package.get('UUID')
-        kwargs['file'] = f"logs/cli.{uuid}.logs"
-        kwargs['errs'] = f"logs/cli.{uuid}.errs"
-        self.logger.debug(f"EZImport: {conn} {target} {int(dataset)} {kwargs}")
-        result = ezomero.ezimport(conn=conn, target=target, dataset=int(dataset), **kwargs)
-        # Check if import succeeded - ezimport returns None on failure, list (possibly empty) on success
-        if result is not None:
-            self.imported = True
-            self.logger.info(f"Import succeeded, got image IDs: {result}")
-        else:
-            self.imported = False
-            self.logger.error("Import failed - ezimport returned None")
-        return result
+        # Use per-file log IDs to avoid log collisions when importing multiple files
+        log_id = f"{uuid}_{file_index}" if file_index is not None else uuid
+
+        for attempt in range(1, IMPORT_MAX_RETRIES + 1):
+            # Use attempt-specific log/err files so retries don't overwrite previous evidence
+            attempt_log_id = f"{log_id}_attempt{attempt}" if attempt > 1 else log_id
+            kwargs['file'] = f"logs/cli.{attempt_log_id}.logs"
+            kwargs['errs'] = f"logs/cli.{attempt_log_id}.errs"
+
+            self.logger.debug(f"EZImport (attempt {attempt}/{IMPORT_MAX_RETRIES}): {conn} {target} {int(dataset)} {kwargs}")
+            result = ezomero.ezimport(conn=conn, target=target, dataset=int(dataset), **kwargs)
+
+            # Check if import succeeded - ezimport returns None on failure, list (possibly empty) on success
+            if result is not None:
+                self.imported = True
+                self.logger.info(f"Import succeeded, got image IDs: {result}")
+                return result
+
+            # Import failed — check if the error is transient/retryable
+            errs_file = kwargs['errs']
+            retryable, pattern = is_retryable_import_error(errs_file, self.logger)
+
+            if retryable and attempt < IMPORT_MAX_RETRIES:
+                delay = IMPORT_RETRY_DELAY * attempt  # increasing backoff
+                self.logger.warning(
+                    f"Import failed with retryable error ({pattern}). "
+                    f"Retrying in {delay}s (attempt {attempt}/{IMPORT_MAX_RETRIES})..."
+                )
+                time.sleep(delay)
+                continue
+            else:
+                if retryable:
+                    self.logger.error(
+                        f"Import failed with retryable error ({pattern}) but max retries "
+                        f"({IMPORT_MAX_RETRIES}) exhausted."
+                    )
+                else:
+                    self.logger.error(
+                        f"Import failed - ezimport returned None (non-retryable error). "
+                        f"Check {errs_file} for details."
+                    )
+                self.imported = False
+                return result
 
     def upload_files(self, conn, file_paths, dataset_id=None, screen_id=None, local_paths=None):
         uuid = self.data_package.get('UUID')
@@ -696,12 +773,14 @@ class DataPackageImporter:
                             # and in local_paths folder on the omero server storage
                             # we will import now in-place from the omero server storage
                             # and then we'll switch the in-place symlinks to the remote storage (subfolder)
+                            log_id = f"{uuid}_{i}"
                             imported = self.import_to_omero(
                                 file_path=local_path,
                                 target_id=screen_id,
                                 target_type='Screen',
                                 uuid=uuid,
-                                depth=10
+                                depth=10,
+                                log_id=log_id
                             )
                             self.logger.debug("Upload done. Retrieving plate id.")
                             image_ids, local_file_dir = self.get_plate_ids(
@@ -712,16 +791,19 @@ class DataPackageImporter:
                                 image_ids = self.import_dataset(
                                     target=local_path,
                                     dataset=dataset_id,
-                                    transfer="ln_s"
+                                    transfer="ln_s",
+                                    file_index=i
                                 )
                                 self.logger.debug(f"EZimport returned ids {image_ids} for {str(file_path)} ({dataset_id})")
                             else:
+                                log_id = f"{uuid}_{i}"
                                 imported = self.import_to_omero(
                                     file_path=local_path,
                                     target_id=dataset_id,
                                     target_type='Dataset',
                                     uuid=uuid,
-                                    depth=10
+                                    depth=10,
+                                    log_id=log_id
                                 )
                                 image_ids = dataset_id
 
@@ -787,12 +869,14 @@ class DataPackageImporter:
                         )
                     else:
                         if screen_id:   # screen
+                            log_id = f"{uuid}_{i}"
                             imported = self.import_to_omero(
                                 file_path=str(file_path),
                                 target_id=screen_id,
                                 target_type='Screen',
                                 uuid=uuid,
-                                depth=10
+                                depth=10,
+                                log_id=log_id
                             )
                             image_ids, _ = self.get_plate_ids(
                                 str(file_path), screen_id)
@@ -801,16 +885,19 @@ class DataPackageImporter:
                                 image_ids = self.import_dataset(
                                     target=str(file_path),
                                     dataset=dataset_id,
-                                    transfer="ln_s"
+                                    transfer="ln_s",
+                                    file_index=i
                                 )
                                 self.logger.debug(f"EZimport returned ids {image_ids} for {str(file_path)} ({dataset_id})")
                             elif os.path.isdir(file_path):
+                                log_id = f"{uuid}_{i}"
                                 imported = self.import_to_omero(
                                     file_path=str(file_path),
                                     target_id=dataset_id,
                                     target_type='Dataset',
                                     uuid=uuid,
-                                    depth=10
+                                    depth=10,
+                                    log_id=log_id
                                 )
                                 image_ids = dataset_id
                                 self.logger.debug(f"Set ids {image_ids} to the dataset {dataset_id}")
