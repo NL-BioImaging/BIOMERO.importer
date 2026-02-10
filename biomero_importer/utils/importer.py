@@ -522,7 +522,7 @@ class DataPackageImporter:
 
     @connection
     def import_zarr(self, conn, uri, target):
-        import omero_zarr.zarr_import
+        import omero_zarr.zarr_import   # ERROR: No module named 'omero_zarr'
 
         import zarr
 
