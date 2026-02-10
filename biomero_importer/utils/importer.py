@@ -520,7 +520,30 @@ class DataPackageImporter:
             self.logger.error(f'Import failed for {str(file_path)}')
             return False
 
-    def import_zarr(self, uri, target, target_by_name=None, endpoint=None, nosignrequest=False):
+    @connection
+    def import_zarr(self, conn, uri, target):
+        import omero_zarr.zarr_import
+
+        import zarr
+
+        objs = omero_zarr.zarr_import.import_zarr(conn, uri, target=target)
+        image_ids = [obj.getId().getValue() for obj in objs]
+
+        root = zarr.open(uri, mode="r")
+        attrs = root.attrs.asdict()
+        if "ome" in attrs:
+            attrs = attrs["ome"]
+        is_plate = "plate" in attrs
+
+        if image_ids:
+            self.imported = True
+            self.logger.info(f'Import successfully for {uri}')
+        else:
+            self.imported = False
+            self.logger.error(f'Import failed for {uri}')
+        return image_ids, is_plate
+
+    def import_zarr1(self, uri, target, target_by_name=None, endpoint=None, nosignrequest=False):
         command = f'omero zarr import {uri}'
         if target:
             command += f' --target {target}'
