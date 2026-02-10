@@ -520,8 +520,28 @@ class DataPackageImporter:
             self.logger.error(f'Import failed for {str(file_path)}')
             return False
 
+    def import_zarr(self, uri, target, target_by_name=None, endpoint=None, nosignrequest=False):
+        command = f'omero zarr import {uri}'
+        if target:
+            command += f' --target {target}'
+
+        self.logger.info(f"OMERO ZARR command: {command}")
+
+        self.logger.debug(command)
+        process = Popen(
+            command,
+            stdout=PIPE,
+            stderr=PIPE,
+            shell=True
+        )
+        stdout, stderr = process.communicate()
+        if stderr:
+            self.logger.warning(stderr.decode("utf-8"))
+        if process.returncode == 0:
+            self.logger.info(f"OME ZARR CLI: {stdout}")
+
     @connection
-    def import_zarr(self, conn, uri, target, target_by_name=None, endpoint=None, nosignrequest=False):
+    def import_zarr0(self, conn, uri, target, target_by_name=None, endpoint=None, nosignrequest=False):
         # Using https://github.com/BioNGFF/omero-import-utils/blob/main/metadata/register.py
         from .register import (load_attrs, register_image, register_plate, link_to_target, validate_endpoint,
                                get_omexml_bytes, full_import, parse_image_metadata, set_rendering_settings,
