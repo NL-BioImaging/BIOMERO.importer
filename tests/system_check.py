@@ -4,7 +4,7 @@ import json
 import uuid
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from biomero_importer.utils.ingest_tracker import Base, IngestionTracking, Preprocessing, STAGE_NEW_ORDER
+from biomero_importer.utils.ingest_tracker import Base, IngestionTracking, Preprocessing, STAGE_NEW_ORDER, _mask_url
 from pathlib import Path
 import datetime
 import shutil
@@ -37,7 +37,7 @@ def main():
     # Load configuration and get the database URL
     config = load_config()
     db_url = config["ingest_tracking_db"]
-    print(f"Using database URL: {db_url}")
+    print(f"Using database URL: {_mask_url(db_url)}")
     
     # Create the engine and sessionmaker
     engine = create_engine(db_url)
