@@ -9,10 +9,11 @@ dynamic = ["version"]
 description = "BIOMERO.importer - Automated Data Import System (formerly OMERO ADI)"
 authors = [{ name = "Core Facility - Cellular Imaging", email = "cellularimaging@amsterdamumc.nl" }]
 license = { file = "LICENSE" }
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 readme = "README.md"  
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
