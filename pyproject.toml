@@ -21,6 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "ezomero==3.2.1",
+    "omero-cli-zarr>=0.7.0rc1",
     "pandas>=2.2.1",
     "numpy>=1.26.4",
     "openpyxl>=3.1.2",
@@ -28,7 +29,7 @@ dependencies = [
     "pytest>=8.2.1",
     "sqlalchemy>=2.0.28",
     "psycopg2>=2.9.7",
-    "zarr>=3",
+    "zarr<3",
     "alembic>=1.13"
 ]
 
