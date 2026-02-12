@@ -523,6 +523,7 @@ class DataPackageImporter:
     @connection
     def import_zarr(self, conn, uri, target, target_by_name=None, endpoint=None, nosignrequest=False):
         # Using https://github.com/BioNGFF/omero-import-utils/blob/main/metadata/register.py
+        # Also using updates from https://github.com/ome/omero-cli-zarr/blob/master/src/omero_zarr/zarr_import.py
         from .register import (load_attrs, register_image, register_plate, link_to_target, validate_endpoint,
                                get_omexml_bytes, full_import, parse_image_metadata, set_rendering_settings,
                                set_external_info)

@@ -43,6 +43,7 @@ from omero.model.enums import PixelsTypeint8, PixelsTypeuint8, PixelsTypeint16
 from omero.model.enums import PixelsTypeuint16, PixelsTypeint32
 from omero.model.enums import PixelsTypeuint32, PixelsTypefloat
 from omero.model.enums import PixelsTypecomplex, PixelsTypedouble
+from omero.model.enums import UnitsLength
 
 from omero.model import ExternalInfoI
 from omero.rtypes import rbool, rdouble, rint, rlong, rstring, rtime
@@ -68,6 +69,8 @@ PIXELS_TYPE = {'int8': PixelsTypeint8,
                'float64': PixelsTypedouble,
                'complex_': PixelsTypecomplex,
                'complex64': PixelsTypecomplex}
+
+UL = sorted(UnitsLength._enumerators.values())
 
 
 def get_omexml_bytes(store):
@@ -403,13 +406,23 @@ def set_rendering_settings(conn, image, image_attrs, pixels_type, families=None,
     return rnd_def
 
 
+def get_unit_length(value):
+    for unit in UL:
+        if unit.name.lower() == value:
+            return unit
+    return None
+
+
 def create_length(value_unit):
     if len(value_unit) > 1 and value_unit[1]:
         try:
-            return LengthI(value_unit[0], value_unit[1].upper())
-        except:
+            unit = get_unit_length(value_unit[1])
+            if unit is None:
+                return LengthI(value_unit[0], UnitsLength.PIXEL)
+            return LengthI(value_unit[0], unit)
+        except TypeError:
             pass
-    return LengthI(value_unit[0])
+    return LengthI(value_unit[0], UnitsLength.PIXEL)
 
 
 def set_pixel_size(image, pixel_size):
@@ -418,7 +431,7 @@ def set_pixel_size(image, pixel_size):
         pixels.setPhysicalSizeX(create_length(pixel_size["x"]))
     if "y" in pixel_size:
         pixels.setPhysicalSizeY(create_length(pixel_size["y"]))
-    if "z" in pixel_size:
+    if "z" in pixel_size and pixel_size["z"] != (1, ''):
         pixels.setPhysicalSizeZ(create_length(pixel_size["z"]))
 
 
