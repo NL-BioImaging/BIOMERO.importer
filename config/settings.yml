@@ -3,7 +3,6 @@
 #------------------------------------------------#
 # Paths settings
 log_file_path: logs/app.logs
-group_list: config/groups_list.json
 base_dir: /data
 data_dir_name: .omerodata
 # ingest_tracking_db: sqlite:///OMERO/ingest_tracking.db
