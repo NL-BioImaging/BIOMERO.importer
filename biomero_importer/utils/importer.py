@@ -568,7 +568,7 @@ class DataPackageImporter:
                 omexml_bytes = get_omexml_bytes(store)
                 if omexml_bytes is not None:
                     print("Importing OME/METADATA.ome.xml")
-                    rsp = full_import(conn.c, omexml_bytes, args.wait)
+                    rsp = full_import(conn.c, omexml_bytes)
                     for series, p in enumerate(rsp.pixels):
                         # set external info. NB: order of pixels MUST match the series 0, 1, 2...
                         image = conn.getObject("Image", p.image.id.val)
