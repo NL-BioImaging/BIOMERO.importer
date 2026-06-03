@@ -670,5 +670,8 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python -m alembic -c biomero_importer\migrations\alembic.ini upgrade head
 ```
 
+## LICENSE
+
+License changed to GPL-2.0 (starting version 1.3), as this work depends on `omero-py` and `ezomero` libraries for the OMERO import and session management.
 
 
