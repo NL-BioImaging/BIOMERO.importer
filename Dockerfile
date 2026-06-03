@@ -98,8 +98,8 @@ ENV _CONTAINERS_USERNS_CONFIGURED="" \
 COPY . /auto-importer
 
 # Install the package - use git version if available, otherwise use fallback version
-RUN git config --global --add safe.directory /auto-importer && \
-    if [ -d "/auto-importer/.git" ]; then \
+RUN if [ -d "/auto-importer/.git" ]; then \
+        git config --global --add safe.directory /auto-importer && \
         pip install /auto-importer; \
     else \
         SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install /auto-importer; \
