@@ -755,7 +755,7 @@ class DataPackageImporter:
             try:
                 if pre_processing:  # pre-processing
                     local_path = local_paths[i]  # TODO: assumes 1:1 local_paths and file_paths
-                    is_zarr = 'zar' in os.path.splitext(local_path)[1].lower()
+                    is_zarr = '.zarr' in local_path.lower() or 'zar' in os.path.splitext(local_path)[1].lower()
                     if is_zarr and self.use_register_zarr:
                         result_entry = self.data_package[
                             PREPROC_RESULTS_KEY
@@ -862,7 +862,7 @@ class DataPackageImporter:
 
                 else:   # no pre-processing
                     local_path = None
-                    is_zarr = 'zar' in os.path.splitext(file_path)[1].lower()
+                    is_zarr = '.zarr' in file_path.lower() or 'zar' in os.path.splitext(file_path)[1].lower()
                     if is_zarr and self.use_register_zarr:
                         image_ids, zarr_is_plate = self.import_zarr(
                             uri=str(file_path),
@@ -919,7 +919,7 @@ class DataPackageImporter:
                     try:
                         # Determine if we're dealing with a plate:
                         # Either we imported to a screen, or ZARR created a plate
-                        is_plate_object = bool(screen_id) or zarr_is_plate
+                        is_plate_object = zarr_is_plate if is_zarr else bool(screen_id)
                         self.add_image_annotations(
                             conn,
                             image_or_plate_id,

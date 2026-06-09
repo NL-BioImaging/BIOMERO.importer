@@ -49,6 +49,8 @@ from omero.model import ExternalInfoI
 from omero.rtypes import rbool, rdouble, rint, rlong, rstring, rtime
 from omero.model import ChecksumAlgorithmI
 from omero.model import LengthI
+from omero.model import TimeI
+from omero.model.enums import UnitsTime
 from omero.model import NamedValue
 from omero.model.enums import ChecksumAlgorithmSHA1160
 from omero_version import omero_version
@@ -280,6 +282,28 @@ def create_image(conn, store, image_attrs, object_name, families, models, args, 
 
     img_obj = image._obj
     set_external_info(img_obj, args, image_path)
+
+    # Set PlaneInfo with deltaT
+    multiscales = image_attrs.get('multiscales', [{}])
+    delta_ts = []
+    if multiscales and isinstance(multiscales, list):
+        delta_ts = multiscales[0].get('metadata', {}).get('deltaT', [])
+    if delta_ts:
+        update_service = conn.getUpdateService()
+        pixels_id = image.getPrimaryPixels().getId()
+        plane_infos = []
+        for the_t in range(size_t):
+            d_t = delta_ts[the_t] if the_t < len(delta_ts) else 0.0
+            for the_c in range(size_c):
+                for the_z in range(size_z):
+                    p_info = omero.model.PlaneInfoI()
+                    p_info.theZ = rint(the_z)
+                    p_info.theC = rint(the_c)
+                    p_info.theT = rint(the_t)
+                    p_info.deltaT = TimeI(d_t, UnitsTime.SECOND)
+                    p_info.pixels = omero.model.PixelsI(pixels_id, False)
+                    plane_infos.append(p_info)
+        update_service.saveAndReturnArray(plane_infos)
 
     return img_obj, rnd_def
 
@@ -589,7 +613,7 @@ def register_plate(conn, store, args, attrs):
             if 'acquisition' in sample_attrs:
                 acquisition_id = sample_attrs['acquisition']
                 pa_id = plate_acquisitions.get(acquisition_id)
-                if pa is not None:
+                if pa_id is not None:
                     ws.plateAcquisition = omero.model.PlateAcquisitionI(pa_id, False)
             ws.image = omero.model.ImageI(image.id.val, False)
             ws.well = well
@@ -676,12 +700,30 @@ def get_uri_parameters(transport_params, nosignrequest):
 def link_to_target(args, conn, obj):
     is_plate = isinstance(obj, omero.model.PlateI)
 
+    target = None
     if args.target:
         if is_plate:
             screen_id = args.target
             if screen_id.startswith("Screen:"):
                 screen_id = screen_id.split(":")[1]
             target = conn.getObject("Screen", attributes={'id': int(screen_id)})
+            if target is None:
+                # If target screen not found, check if it's a Dataset ID
+                ds = conn.getObject("Dataset", attributes={'id': int(screen_id)})
+                if ds:
+                    ds_name = ds.getName()
+                    print(f"Target is Dataset '{ds_name}' (ID {screen_id}) but registering a Plate. Finding or creating a Screen with name '{ds_name}'...")
+                    # Find if a Screen with same name exists
+                    existing_screen = conn.getObject("Screen", attributes={'name': ds_name})
+                    if existing_screen:
+                        target = existing_screen
+                        print(f"Found existing Screen '{ds_name}' (ID {target.getId()})")
+                    else:
+                        new_screen = omero.model.ScreenI()
+                        new_screen.name = rstring(ds_name)
+                        saved_screen = conn.getUpdateService().saveAndReturnObject(new_screen)
+                        target = conn.getObject("Screen", saved_screen.getId().getValue())
+                        print(f"Created new Screen '{ds_name}' (ID {target.getId()})")
         else:
             dataset_id = args.target
             if dataset_id.startswith("Dataset:"):
