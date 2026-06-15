@@ -8,6 +8,7 @@ build/
 test_logfile.log
 biomero_importer.egg-info/
 omeroadi.egg-info/
+biomero_importer/_version.py
 .pytest_cache/
 **/__pycache__
 .coverage
