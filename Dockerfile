@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     libpq-dev \
     build-essential \
+    libcap2-bin \
     fuse-overlayfs \
     podman \
     unzip
@@ -36,22 +37,24 @@ RUN groupadd -g 1000 autoimportgroup && \
 #   - https://www.redhat.com/en/blog/podman-inside-container
 #   - https://github.com/containers/image_build/blob/main/podman/Containerfile
 #
-# Below setup still requires specifically that the user (autoimportuser here)
-# is id 1000:1000 and that we use these tags when running:
+# The application and its nested Podman engine run as autoimportuser
+# (UID/GID 1000). With VFS storage, the outer rootless container needs:
 #
-# --privileged 
-# --device /dev/fuse 
-# --security-opt label=disable 
+# --userns=keep-id:uid=1000,gid=1000
+# --security-opt label=disable
 #
-# It is also quite specific to Podman in Podman, so that's locked in.
+# No --privileged, additional capability, or /dev/fuse device is required.
+# fuse-overlayfs remains available for deployments that select overlay storage.
 # -------------------------------------------------------------- # 
 
 # Pre-create necessary directories in the user's home directory
 RUN mkdir -p /home/autoimportuser/.local/share/containers/storage /home/autoimportuser/.config/containers
 
-# Add mappings to /etc/subuid and /etc/subgid
-RUN echo -e "autoimportuser:1:999\nautoimportuser:1001:64535" > /etc/subuid && \
-    echo -e "autoimportuser:1:999\nautoimportuser:1001:64535" > /etc/subgid
+# Add mappings to /etc/subuid and /etc/subgid. Use printf because Debian's
+# /bin/sh writes a literal "-e" when echo -e is used, which invalidates the
+# first subordinate-ID range.
+RUN printf 'autoimportuser:1:999\nautoimportuser:1001:64535\n' > /etc/subuid && \
+    printf 'autoimportuser:1:999\nautoimportuser:1001:64535\n' > /etc/subgid
 
 # Ensure proper permissions for all relevant directories in the user's home directory
 RUN chown -R autoimportuser:autoimportgroup /home/autoimportuser/.local /home/autoimportuser/.config /auto-importer
@@ -86,9 +89,12 @@ RUN mkdir -p /var/lib/shared/overlay-images \
     touch /var/lib/shared/vfs-images/images.lock && \
     touch /var/lib/shared/vfs-layers/layers.lock
 
-# Set permissions for Podman tools
-RUN chmod 4755 /usr/bin/newgidmap && \
-    chmod 4755 /usr/bin/newuidmap
+# Nested rootless Podman needs mapping helpers with file capabilities. A setuid
+# bit does not provide the required capability through the outer rootless user
+# namespace.
+RUN chmod 0755 /usr/bin/newuidmap /usr/bin/newgidmap && \
+    setcap cap_setuid=ep /usr/bin/newuidmap && \
+    setcap cap_setgid=ep /usr/bin/newgidmap
 
 # Set environment variable to allow custom Podman configurations
 ENV _CONTAINERS_USERNS_CONFIGURED="" \
