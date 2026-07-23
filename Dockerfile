@@ -60,16 +60,9 @@ RUN printf 'autoimportuser:1:999\nautoimportuser:1001:64535\n' > /etc/subuid && 
 RUN chown -R autoimportuser:autoimportgroup /home/autoimportuser/.local /home/autoimportuser/.config /auto-importer
 
 # Add container configuration files
-ADD /containers.conf /etc/containers/containers.conf
-ADD /storage.conf /etc/containers/storage.conf
-ADD /podman-containers.conf /home/autoimportuser/.config/containers/containers.conf
-
-# Copy & modify the defaults to provide reference if runtime changes needed
-RUN sed -e 's|^#mount_program|mount_program|g' \
-           -e '/additionalimage.*/a "/var/lib/shared",' \
-           -e 's|^mountopt[[:space:]]*=.*$|mountopt = "nodev,fsync=0"|g' \
-           /etc/containers/storage.conf \
-           > /etc/containers/storage.conf
+COPY /containers.conf /etc/containers/containers.conf
+COPY /storage.conf /etc/containers/storage.conf
+COPY /podman-containers.conf /home/autoimportuser/.config/containers/containers.conf
 
 # Set up internal Podman to pass subscriptions down from host to internal container
 RUN printf '/run/secrets/etc-pki-entitlement:/run/secrets/etc-pki-entitlement\n/run/secrets/rhsm:/run/secrets/rhsm\n' > /etc/containers/mounts.conf
