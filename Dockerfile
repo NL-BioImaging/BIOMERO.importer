@@ -91,7 +91,9 @@ RUN chmod 0755 /usr/bin/newuidmap /usr/bin/newgidmap && \
 
 # Set environment variable to allow custom Podman configurations
 ENV _CONTAINERS_USERNS_CONFIGURED="" \
-    BUILDAH_ISOLATION=chroot
+    BUILDAH_ISOLATION=chroot \
+    PODMAN_BIND_RETRY_ATTEMPTS=3 \
+    PODMAN_BIND_RETRY_DELAY_SECONDS=2
 
 # Copy the application code (when building from the repository context)
 COPY . /auto-importer

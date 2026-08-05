@@ -3,6 +3,7 @@ import csv
 import shutil
 import logging
 import functools
+import re
 import time
 from subprocess import Popen, PIPE, STDOUT
 from importlib import import_module
@@ -25,8 +26,18 @@ MAX_RETRIES = 5  # Maximum number of retries
 RETRY_DELAY = 5  # Delay between retries (in seconds)
 IMPORT_MAX_RETRIES = 3  # Maximum retries for transient import errors (e.g. Ice race conditions)
 IMPORT_RETRY_DELAY = 10  # Delay between import retries (in seconds)
+PODMAN_RUN_MAX_ATTEMPTS = 3  # Bounded retries for transient bind setup failures
+PODMAN_RUN_RETRY_DELAY = 2  # Initial retry delay, doubled after each failure
 TMP_OUTPUT_FOLDER = "OMERO_inplace"
 PROCESSED_DATA_FOLDER = ".processed"
+
+# A CIFS/DFS referral reconnect can make Podman's first bind-source statfs fail
+# even though the same mount succeeds immediately afterward. Keep this exact so
+# converter, image, permission, and generic Podman failures remain immediate.
+RETRYABLE_PODMAN_RUN_ERROR = re.compile(
+    r"^Error: statfs .*: device or resource busy$",
+    re.IGNORECASE,
+)
 
 # Error patterns that indicate a transient/retryable import failure
 # (e.g. concurrent Ice session race conditions)
@@ -88,6 +99,16 @@ def is_retryable_import_error(errs_file, logger=None):
         if logger:
             logger.warning(f"Could not read errs file {errs_file}: {e}")
     return False, None
+
+
+def is_retryable_podman_run_error(output_lines):
+    """Return whether Podman failed on the known transient bind-source EBUSY."""
+    for line in output_lines:
+        if isinstance(line, bytes):
+            line = line.decode(errors="replace")
+        if RETRYABLE_PODMAN_RUN_ERROR.match(line.strip()):
+            return True
+    return False
 
 
 def connection(func):
@@ -241,6 +262,64 @@ class DataProcessor:
         for line in iter(pipe.readline, b''):
             self.logger.debug('sub: %r', line)
 
+    def _positive_int_env(self, name, default):
+        """Read a positive integer setting, falling back safely on bad input."""
+        value = os.getenv(name)
+        if value is None:
+            return default
+        try:
+            parsed = int(value)
+            if parsed < 1:
+                raise ValueError
+            return parsed
+        except ValueError:
+            self.logger.warning(
+                f"Ignoring invalid {name}={value!r}; using {default}."
+            )
+            return default
+
+    def _run_podman_command(self, podman_command):
+        """Run preprocessing with a bounded retry for transient CIFS/DFS EBUSY."""
+        max_attempts = self._positive_int_env(
+            "PODMAN_BIND_RETRY_ATTEMPTS", PODMAN_RUN_MAX_ATTEMPTS
+        )
+        retry_delay = self._positive_int_env(
+            "PODMAN_BIND_RETRY_DELAY_SECONDS", PODMAN_RUN_RETRY_DELAY
+        )
+
+        for attempt in range(1, max_attempts + 1):
+            process = Popen(podman_command, stdout=PIPE, stderr=STDOUT)
+            output_lines = []
+
+            with process.stdout:
+                for line in iter(process.stdout.readline, b''):
+                    line_str = line.decode(errors="replace").strip()
+                    output_lines.append(line_str)
+                    self.logger.debug('sub: %r', line)
+
+            return_code = process.wait()
+            if return_code == 0:
+                return return_code, output_lines
+
+            if not is_retryable_podman_run_error(output_lines):
+                return return_code, output_lines
+
+            if attempt == max_attempts:
+                self.logger.error(
+                    "Podman bind source remained busy after "
+                    f"{attempt} attempts."
+                )
+                return return_code, output_lines
+
+            self.logger.warning(
+                "Transient CIFS/DFS bind-source EBUSY; retrying Podman run "
+                f"in {retry_delay}s (attempt {attempt + 1}/{max_attempts})."
+            )
+            time.sleep(retry_delay)
+            retry_delay *= 2
+
+        return 1, []
+
     def build_podman_command(self, file_path):
         """Construct the full Podman command based on preprocessing parameters.
 
@@ -302,16 +381,10 @@ class DataProcessor:
                 self.logger.info(f"Dry run: {' '.join(podman_command)}")
                 continue
 
-            process = Popen(podman_command, stdout=PIPE, stderr=STDOUT)
-            output_lines = []
-
-            with process.stdout:
-                for line in iter(process.stdout.readline, b''):
-                    line_str = line.decode().strip()
-                    output_lines.append(line_str)
-                    self.logger.debug('sub: %r', line)
-
-            if process.wait() != 0:
+            return_code, output_lines = self._run_podman_command(
+                podman_command
+            )
+            if return_code != 0:
                 self.logger.error("Podman command failed.")
                 return False, []
 
