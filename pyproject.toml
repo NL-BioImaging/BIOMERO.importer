@@ -31,7 +31,7 @@ dependencies = [
     "psycopg2>=2.9.7",
     "zarr>=3",
     "alembic>=1.13",
-    "biomero-schema>=0.2,<0.3"
+    "biomero-schema>=0.2.dev0,<0.3"
 ]
 
 [project.optional-dependencies]
