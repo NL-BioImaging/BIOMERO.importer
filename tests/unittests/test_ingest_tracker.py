@@ -5,6 +5,7 @@ from biomero_importer.utils.ingest_tracker import initialize_ingest_tracker, log
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 import tempfile
+from unittest.mock import MagicMock, patch
 
 TEST_LOG_PATH = 'test_logfile.log'  # Static log file path
 
@@ -83,3 +84,39 @@ def test_log_ingestion_step(setup_database):
         
     # Close the engine explicitly to release resources
     engine.dispose()
+
+
+def test_prepare_ingest_tracker_replaces_inherited_pool():
+    from biomero_importer.utils import ingest_tracker
+
+    inherited_tracker = MagicMock()
+    with patch.object(ingest_tracker, '_ingest_tracker', inherited_tracker):
+        result = ingest_tracker.prepare_ingest_tracker_for_worker({})
+
+    assert result is True
+    inherited_tracker.engine.dispose.assert_called_once_with(close=False)
+
+
+def test_prepare_ingest_tracker_initializes_spawned_worker():
+    from biomero_importer.utils import ingest_tracker
+
+    config = {'ingest_tracking_db': 'sqlite://'}
+    with patch.object(ingest_tracker, '_ingest_tracker', None), \
+         patch.object(
+             ingest_tracker, 'initialize_ingest_tracker', return_value=True
+         ) as initialize:
+        result = ingest_tracker.prepare_ingest_tracker_for_worker(config)
+
+    assert result is True
+    initialize.assert_called_once_with(config)
+
+
+def test_prepare_ingest_tracker_fails_when_spawned_worker_cannot_initialize():
+    from biomero_importer.utils import ingest_tracker
+
+    with patch.object(ingest_tracker, '_ingest_tracker', None), \
+         patch.object(
+             ingest_tracker, 'initialize_ingest_tracker', return_value=False
+         ):
+        with pytest.raises(RuntimeError, match='worker process'):
+            ingest_tracker.prepare_ingest_tracker_for_worker({})

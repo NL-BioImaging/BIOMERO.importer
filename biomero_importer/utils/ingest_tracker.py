@@ -424,6 +424,31 @@ def initialize_ingest_tracker(config):
         return False
 
 
+def prepare_ingest_tracker_for_worker(config):
+    """Ensure a process-pool worker never uses the parent's DB connections.
+
+    ``ProcessPoolExecutor`` forks the already-initialized tracker on Linux.
+    SQLAlchemy engines may be shared between processes, but their pooled DBAPI
+    connections may not. Replacing the inherited pool in the child preserves
+    the parent's connections while making the child's first checkout create a
+    process-local connection.
+
+    On platforms that spawn workers instead of forking them, no tracker is
+    inherited, so initialize one from the worker's copy of the configuration.
+    """
+    tracker = get_ingest_tracker()
+    if tracker is not None:
+        tracker.engine.dispose(close=False)
+        logger.debug("Replaced inherited database pool in worker process")
+        return True
+
+    if initialize_ingest_tracker(config):
+        logger.debug("Initialized database pool in spawned worker process")
+        return True
+
+    raise RuntimeError("Failed to initialize ingest tracker in worker process")
+
+
 def log_ingestion_step(order_info, stage):
     """Thread-safe function to log ingestion steps."""
     tracker = get_ingest_tracker()
