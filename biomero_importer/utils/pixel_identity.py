@@ -5,12 +5,15 @@ module only selects one explicit image node, validates the public API result,
 and combines it with the semantic guard required by BIOMERO's shared contract.
 """
 
+from dataclasses import dataclass
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
+import json
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 from biomero_schema.zarr import PixelIdentity
+import numpy as np
 
 
 BiocodeCallable = Callable[..., Sequence[Mapping[str, Any]]]
@@ -21,6 +24,18 @@ class PixelIdentityError(RuntimeError):
     """An exact pixel identity could not be calculated unambiguously."""
 
 
+@dataclass(frozen=True)
+class ZarrNodeSemanticGuard:
+    """Relevant metadata for the highest-resolution array of one NGFF node."""
+
+    shape: tuple[int, ...]
+    dtype: str
+    axes: tuple[str, ...]
+    coordinate_transformations: tuple[dict[str, Any], ...]
+    ngff_version: str
+    zarr_format: int
+
+
 def _validate_node_path(node_path: str) -> PurePosixPath:
     if not node_path or "\\" in node_path:
         raise PixelIdentityError(f"Unsafe Zarr node path: {node_path!r}")
@@ -28,6 +43,94 @@ def _validate_node_path(node_path: str) -> PurePosixPath:
     if parsed.is_absolute() or ".." in parsed.parts:
         raise PixelIdentityError(f"Unsafe Zarr node path: {node_path!r}")
     return parsed
+
+
+def _read_json_object(path: Path, description: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PixelIdentityError(
+            f"Cannot read {description} metadata: {path}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise PixelIdentityError(f"Invalid {description} metadata: {path}")
+    return value
+
+
+def read_zarr_v2_semantic_guard(
+    zarr_root: str | Path, node_path: str
+) -> ZarrNodeSemanticGuard:
+    """Read the supported NGFF 0.4/Zarr v2 guard for one explicit image node."""
+    parsed_node = _validate_node_path(node_path)
+    node = Path(zarr_root)
+    if node_path != ".":
+        node = node.joinpath(*parsed_node.parts)
+
+    attributes = _read_json_object(node / ".zattrs", "NGFF image")
+    multiscales = attributes.get("multiscales")
+    if not isinstance(multiscales, list) or len(multiscales) != 1:
+        raise PixelIdentityError(
+            "NGFF image metadata must contain exactly one multiscales entry"
+        )
+    multiscale = multiscales[0]
+    if not isinstance(multiscale, dict) or multiscale.get("version") != "0.4":
+        raise PixelIdentityError("Only NGFF 0.4 image metadata is supported")
+
+    raw_axes = multiscale.get("axes")
+    if not isinstance(raw_axes, list) or not raw_axes:
+        raise PixelIdentityError("NGFF 0.4 image metadata has no named axes")
+    axes = []
+    for axis in raw_axes:
+        name = axis.get("name") if isinstance(axis, dict) else axis
+        if not isinstance(name, str) or not name:
+            raise PixelIdentityError("NGFF 0.4 image metadata has an invalid axis")
+        axes.append(name)
+
+    datasets = multiscale.get("datasets")
+    if not isinstance(datasets, list) or not datasets:
+        raise PixelIdentityError("NGFF 0.4 image metadata has no datasets")
+    highest_resolution = datasets[0]
+    if not isinstance(highest_resolution, dict):
+        raise PixelIdentityError("NGFF 0.4 dataset metadata is invalid")
+    dataset_path = highest_resolution.get("path")
+    if not isinstance(dataset_path, str):
+        raise PixelIdentityError("NGFF 0.4 dataset path is missing")
+    parsed_dataset = _validate_node_path(dataset_path)
+    array_path = node
+    if dataset_path != ".":
+        array_path = node.joinpath(*parsed_dataset.parts)
+
+    array = _read_json_object(array_path / ".zarray", "Zarr array")
+    if array.get("zarr_format") != 2:
+        raise PixelIdentityError("Only Zarr v2 arrays are supported")
+    shape = array.get("shape")
+    if (
+        not isinstance(shape, list)
+        or not shape
+        or any(not isinstance(size, int) or size < 1 for size in shape)
+    ):
+        raise PixelIdentityError("Zarr v2 array shape is invalid")
+    if len(shape) != len(axes):
+        raise PixelIdentityError("Zarr array shape does not match NGFF axes")
+    try:
+        dtype = np.dtype(array["dtype"]).name
+    except (KeyError, TypeError) as exc:
+        raise PixelIdentityError("Zarr v2 array dtype is invalid") from exc
+
+    transformations = highest_resolution.get("coordinateTransformations", [])
+    if not isinstance(transformations, list) or any(
+        not isinstance(item, dict) for item in transformations
+    ):
+        raise PixelIdentityError("NGFF coordinate transformations are invalid")
+
+    return ZarrNodeSemanticGuard(
+        shape=tuple(shape),
+        dtype=dtype,
+        axes=tuple(axes),
+        coordinate_transformations=tuple(dict(item) for item in transformations),
+        ngff_version="0.4",
+        zarr_format=2,
+    )
 
 
 class IsccBioIdentityProvider:
@@ -150,5 +253,7 @@ __all__ = [
     "IsccBioIdentityProvider",
     "ISCC_BIO_GIT_REVISION",
     "PixelIdentityError",
+    "ZarrNodeSemanticGuard",
     "pixel_identities_match",
+    "read_zarr_v2_semantic_guard",
 ]

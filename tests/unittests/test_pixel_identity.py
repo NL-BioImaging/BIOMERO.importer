@@ -15,11 +15,110 @@ SPEC.loader.exec_module(pixel_identity)
 
 IsccBioIdentityProvider = pixel_identity.IsccBioIdentityProvider
 PixelIdentityError = pixel_identity.PixelIdentityError
+read_zarr_v2_semantic_guard = pixel_identity.read_zarr_v2_semantic_guard
 pixel_identities_match = pixel_identity.pixel_identities_match
 
 
 def biocode_result(code="ISCC:KSUM", data="ISCC:GDATA", instance="ISCC:IINSTANCE"):
     return {"iscc_code": code, "units": [data, instance]}
+
+
+def write_json(path, value):
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def make_ngff_v2_image(root, node_path="."):
+    node = root if node_path == "." else root / node_path
+    write_json(node / ".zgroup", {"zarr_format": 2})
+    write_json(
+        node / ".zattrs",
+        {
+            "multiscales": [
+                {
+                    "version": "0.4",
+                    "axes": [
+                        {"name": "t", "type": "time"},
+                        {"name": "c", "type": "channel"},
+                        {"name": "z", "type": "space"},
+                        {"name": "y", "type": "space"},
+                        {"name": "x", "type": "space"},
+                    ],
+                    "datasets": [
+                        {
+                            "path": "0",
+                            "coordinateTransformations": [
+                                {"type": "scale", "scale": [1, 1, 2, 0.5, 0.5]}
+                            ],
+                        },
+                        {"path": "1"},
+                    ],
+                }
+            ]
+        },
+    )
+    write_json(
+        node / "0" / ".zarray",
+        {"zarr_format": 2, "shape": [1, 2, 3, 16, 32], "dtype": "<u2"},
+    )
+    return node
+
+
+def test_reads_ngff_04_zarr_v2_semantic_guard(tmp_path):
+    root = tmp_path / "input.ome.zarr"
+    make_ngff_v2_image(root)
+
+    guard = read_zarr_v2_semantic_guard(root, ".")
+
+    assert guard.shape == (1, 2, 3, 16, 32)
+    assert guard.dtype == "uint16"
+    assert guard.axes == ("t", "c", "z", "y", "x")
+    assert guard.coordinate_transformations == (
+        {"type": "scale", "scale": [1, 1, 2, 0.5, 0.5]},
+    )
+    assert guard.ngff_version == "0.4"
+    assert guard.zarr_format == 2
+
+
+def test_reads_nested_plate_image_node(tmp_path):
+    root = tmp_path / "plate.ome.zarr"
+    make_ngff_v2_image(root, "A/1/0")
+
+    guard = read_zarr_v2_semantic_guard(root, "A/1/0")
+
+    assert guard.shape == (1, 2, 3, 16, 32)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda node: (node / ".zattrs").unlink(), "metadata"),
+        (
+            lambda node: write_json(
+                node / ".zattrs", {"multiscales": [{"version": "0.5"}]}
+            ),
+            "NGFF 0.4",
+        ),
+        (
+            lambda node: write_json(
+                node / "0" / ".zarray",
+                {"zarr_format": 3, "shape": [8, 8], "dtype": "uint8"},
+            ),
+            "Zarr v2",
+        ),
+    ],
+)
+def test_semantic_guard_fails_closed_for_unsupported_metadata(
+    tmp_path, mutate, message
+):
+    root = tmp_path / "input.ome.zarr"
+    node = make_ngff_v2_image(root)
+    mutate(node)
+
+    with pytest.raises(PixelIdentityError, match=message):
+        read_zarr_v2_semantic_guard(root, ".")
 
 
 def test_builds_identity_from_public_iscc_bio_api(tmp_path):
