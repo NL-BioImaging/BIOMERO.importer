@@ -182,6 +182,53 @@ def test_targets_an_explicit_nested_zarr_node(tmp_path):
     assert identity.node_path == "A/1/0"
 
 
+def test_builds_omero_identity_through_same_public_api():
+    connection = object()
+    calls = []
+
+    def generate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return [biocode_result()]
+
+    provider = IsccBioIdentityProvider(
+        generate_biocode=generate,
+        tool_version="0.1.0",
+    )
+
+    identity = provider.generate_omero(
+        connection,
+        image_id=3207,
+        node_path=".",
+        role="image",
+        shape=(1, 2, 3, 16, 32),
+        dtype="uint16",
+        axes=("t", "c", "z", "y", "x"),
+        coordinate_transformations=({"type": "scale", "scale": [1, 1, 1, 2, 2]},),
+    )
+
+    assert calls == [((), {"conn": connection, "iid": 3207})]
+    assert identity.instance_code == "ISCC:IINSTANCE"
+    assert identity.shape == (1, 2, 3, 16, 32)
+
+
+def test_omero_identity_rejects_invalid_image_id():
+    provider = IsccBioIdentityProvider(
+        generate_biocode=lambda *args, **kwargs: [biocode_result()],
+        tool_version="0.1.0",
+    )
+
+    with pytest.raises(PixelIdentityError, match="positive"):
+        provider.generate_omero(
+            object(),
+            image_id=0,
+            node_path=".",
+            role="image",
+            shape=(8, 8),
+            dtype="uint8",
+            axes=("y", "x"),
+        )
+
+
 @pytest.mark.parametrize("node_path", ["../escape", "/absolute", r"A\1\0"])
 def test_rejects_unsafe_node_path(tmp_path, node_path):
     provider = IsccBioIdentityProvider(

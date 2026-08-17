@@ -192,9 +192,65 @@ class IsccBioIdentityProvider:
 
         generate, tool_version = self._load_upstream()
         results = list(generate(target, source_type="zarr"))
+        return self._build_identity(
+            results,
+            source_description="An explicit Zarr node",
+            tool_version=tool_version,
+            node_path=node_path,
+            role=role,
+            shape=shape,
+            dtype=dtype,
+            axes=axes,
+            coordinate_transformations=coordinate_transformations,
+        )
+
+    def generate_omero(
+        self,
+        connection: Any,
+        *,
+        image_id: int,
+        node_path: str,
+        role: Literal["image", "label"],
+        shape: Sequence[int],
+        dtype: str,
+        axes: Sequence[str],
+        coordinate_transformations: Sequence[Mapping[str, Any]] = (),
+    ) -> PixelIdentity:
+        """Hash one OMERO Image through the upstream Blitz IMAGEWALK reader."""
+        _validate_node_path(node_path)
+        if not isinstance(image_id, int) or isinstance(image_id, bool) or image_id < 1:
+            raise PixelIdentityError("OMERO image ID must be a positive integer")
+        generate, tool_version = self._load_upstream()
+        results = list(generate(conn=connection, iid=image_id))
+        return self._build_identity(
+            results,
+            source_description=f"OMERO Image {image_id}",
+            tool_version=tool_version,
+            node_path=node_path,
+            role=role,
+            shape=shape,
+            dtype=dtype,
+            axes=axes,
+            coordinate_transformations=coordinate_transformations,
+        )
+
+    def _build_identity(
+        self,
+        results: Sequence[Mapping[str, Any]],
+        *,
+        source_description: str,
+        tool_version: str,
+        node_path: str,
+        role: Literal["image", "label"],
+        shape: Sequence[int],
+        dtype: str,
+        axes: Sequence[str],
+        coordinate_transformations: Sequence[Mapping[str, Any]],
+    ) -> PixelIdentity:
+        """Validate one public API result and produce the shared contract."""
         if len(results) != 1:
             raise PixelIdentityError(
-                "An explicit Zarr node must produce exactly one scene; "
+                f"{source_description} must produce exactly one scene; "
                 f"iscc-bio returned {len(results)}"
             )
 
