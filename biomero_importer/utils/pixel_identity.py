@@ -191,7 +191,12 @@ class IsccBioIdentityProvider:
             target = target.joinpath(*parsed_node.parts)
 
         generate, tool_version = self._load_upstream()
-        results = list(generate(target, source_type="zarr"))
+        # Use iscc-bio's BioIO IMAGEWALK implementation for explicit image
+        # nodes.  iscc-bio 0.1.0's direct NGFF reader mistakes the numeric
+        # pyramid arrays of a normal multiscale image for bioformats2raw
+        # series. BioIO follows the same upstream IMAGEWALK contract without
+        # duplicating hashing or traversal here.
+        results = list(generate(target, source_type="bioio"))
         return self._build_identity(
             results,
             source_description="An explicit Zarr node",

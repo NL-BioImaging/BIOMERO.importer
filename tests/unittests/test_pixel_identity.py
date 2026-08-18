@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 MODULE_PATH = (
@@ -145,7 +146,7 @@ def test_builds_identity_from_public_iscc_bio_api(tmp_path):
         coordinate_transformations=({"type": "scale", "scale": [1, 1, 1, 2, 2]},),
     )
 
-    assert calls == [(zarr, "zarr")]
+    assert calls == [(zarr, "bioio")]
     assert identity.iscc_code == "ISCC:KSUM"
     assert identity.data_code == "ISCC:GDATA"
     assert identity.instance_code == "ISCC:IINSTANCE"
@@ -155,6 +156,54 @@ def test_builds_identity_from_public_iscc_bio_api(tmp_path):
     )
     assert identity.node_path == "."
     assert identity.shape == (1, 2, 3, 16, 32)
+
+
+def test_default_provider_hashes_standard_numeric_pyramid(tmp_path):
+    pytest.importorskip("iscc_bio")
+    zarr = pytest.importorskip("zarr")
+
+    root = tmp_path / "input.ome.zarr"
+    group = zarr.open_group(root, mode="w", zarr_format=2)
+    group.create_array(
+        "0",
+        data=np.arange(60, dtype="uint16").reshape(1, 3, 1, 4, 5),
+        chunks=(1, 1, 1, 4, 5),
+    )
+    group.attrs["multiscales"] = [
+        {
+            "version": "0.4",
+            "axes": [
+                {"name": "t", "type": "time"},
+                {"name": "c", "type": "channel"},
+                {"name": "z", "type": "space"},
+                {"name": "y", "type": "space"},
+                {"name": "x", "type": "space"},
+            ],
+            "datasets": [
+                {
+                    "path": "0",
+                    "coordinateTransformations": [
+                        {"type": "scale", "scale": [1, 1, 1, 1, 1]}
+                    ],
+                }
+            ],
+        }
+    ]
+    guard = read_zarr_v2_semantic_guard(root, ".")
+
+    identity = IsccBioIdentityProvider().generate(
+        root,
+        node_path=".",
+        role="image",
+        shape=guard.shape,
+        dtype=guard.dtype,
+        axes=guard.axes,
+        coordinate_transformations=guard.coordinate_transformations,
+    )
+
+    assert identity.instance_code == (
+        "ISCC:IAD3A4P5I72SL7N754WGCDJJXO36V3EI65WIKFWN7DFJWT2KPDQUT6I"
+    )
 
 
 def test_targets_an_explicit_nested_zarr_node(tmp_path):
@@ -178,7 +227,7 @@ def test_targets_an_explicit_nested_zarr_node(tmp_path):
         axes=("t", "c", "z", "y", "x"),
     )
 
-    assert calls == [(node, "zarr")]
+    assert calls == [(node, "bioio")]
     assert identity.node_path == "A/1/0"
 
 

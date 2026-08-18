@@ -30,7 +30,7 @@ jobs:
         # Install ZeroC Ice from Glencoe prebuilt binaries
         python -m pip install https://github.com/glencoesoftware/zeroc-ice-py-linux-x86_64/releases/download/20240202/zeroc_ice-3.6.5-cp312-cp312-manylinux_2_28_x86_64.whl
         python -m pip install "biomero-schema @ git+https://github.com/NL-BioImaging/biomero-schema.git@feature/zarr-shallow-storage"
-        python -m pip install --editable .[test]
+        python -m pip install --editable .[test,identity]
     - name: Lint with flake8
       run: |
         # stop the build if there are Python syntax errors or undefined names
