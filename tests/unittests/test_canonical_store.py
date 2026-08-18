@@ -1,3 +1,4 @@
+import errno
 import json
 import importlib.util
 from pathlib import Path
@@ -98,6 +99,35 @@ def test_atomically_promotes_zarr_with_committed_marker(
     assert committed == tmp_path / source_record["relativePath"]
     assert committed.is_dir()
     assert not staging.exists()
+    marker = json.loads(
+        (committed / CANONICAL_MARKER_NAME).read_text(encoding="utf-8")
+    )
+    assert marker["state"] == "committed"
+    assert marker["source"] == source_record
+
+
+def test_promotes_across_filesystems_via_destination_staging(
+    tmp_path, source_record, monkeypatch
+):
+    store = CanonicalStore(tmp_path / "managed")
+    staging = tmp_path / "task" / "staging.ome.zarr"
+    make_zarr_v2(staging)
+    destination = store.destination_for(source_record)
+    real_replace = canonical_store.os.replace
+
+    def replace_with_cross_device_boundary(source, target):
+        if Path(source) == staging and Path(target) == destination:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(canonical_store.os, "replace", replace_with_cross_device_boundary)
+
+    committed = store.commit(staging, source_record)
+
+    assert committed == destination
+    assert committed.is_dir()
+    assert not staging.exists()
+    assert not list(destination.parent.glob(f".{destination.name}.staging-*"))
     marker = json.loads(
         (committed / CANONICAL_MARKER_NAME).read_text(encoding="utf-8")
     )

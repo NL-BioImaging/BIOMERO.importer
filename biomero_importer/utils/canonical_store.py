@@ -1,9 +1,12 @@
 """Transactional storage primitives for canonical BIOMERO Zarrs."""
 
 from contextlib import contextmanager
+import errno
 import json
 import os
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Any, Iterator, Mapping, Optional, Union
 
 from biomero_schema.zarr import CanonicalZarrSource
@@ -177,8 +180,32 @@ class CanonicalStore:
             )
             os.replace(marker_tmp, marker_path)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staging_path, destination)
+            try:
+                os.replace(staging_path, destination)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                self._copy_across_filesystems(staging_path, destination)
             return destination
+
+    @staticmethod
+    def _copy_across_filesystems(staging_path: Path, destination: Path) -> None:
+        """Copy beside the destination, atomically publish, then remove source."""
+        destination_staging = Path(tempfile.mkdtemp(
+            prefix=f".{destination.name}.staging-",
+            dir=destination.parent,
+        ))
+        try:
+            shutil.copytree(
+                staging_path,
+                destination_staging,
+                dirs_exist_ok=True,
+            )
+            os.replace(destination_staging, destination)
+        except Exception:
+            shutil.rmtree(destination_staging, ignore_errors=True)
+            raise
+        shutil.rmtree(staging_path)
 
     @staticmethod
     def _validate_zarr(path: Path) -> None:
