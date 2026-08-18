@@ -126,12 +126,25 @@ def test_load_config():
 
 def test_create_executor(mock_config):
     with patch('biomero_importer.main.ProcessPoolExecutor') as mock_executor:
-        from biomero_importer.main import create_executor
+        from biomero_importer.main import create_executor, initialize_worker
         create_executor(mock_config)
         mock_executor.assert_called_once_with(
             max_workers=mock_config.get('max_workers', 4),
-            initializer=mock_executor.call_args.kwargs['initializer']
+            initializer=initialize_worker,
+            initargs=(mock_config,),
         )
+
+
+def test_initialize_worker_prepares_process_local_tracker(mock_config):
+    with patch('biomero_importer.main.logging.basicConfig'), \
+         patch('biomero_importer.main.logging.FileHandler'), \
+         patch('biomero_importer.main.logging.StreamHandler'), \
+         patch('biomero_importer.main.prepare_ingest_tracker_for_worker') as prepare:
+        from biomero_importer.main import initialize_worker
+
+        initialize_worker(mock_config)
+
+        prepare.assert_called_once_with(mock_config)
 
 
 @pytest.fixture

@@ -18,6 +18,7 @@ from .utils.upload_order_manager import UploadOrderManager
 from .utils.importer import DataPackageImporter
 from .utils.ingest_tracker import (
     log_ingestion_step,
+    prepare_ingest_tracker_for_worker,
     STAGE_NEW_ORDER,
     STAGE_INGEST_STARTED,
     STAGE_INGEST_FAILED,
@@ -47,30 +48,34 @@ def load_config(settings_path="config/settings.yml"):
 # --------------------------------------------------
 
 
+def initialize_worker(config):
+    """Initialize logging and process-local database resources in a worker."""
+    log_level = config.get('log_level', 'INFO').upper()
+    log_file = config.get('log_file_path', 'logs/app.logs')
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format='%(asctime)s - PID:%(process)d - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    # Add specific logger for ezomero
+    logging.getLogger('ezomero').setLevel(logging.DEBUG)
+    # Reduce noise from OMERO gateway during startup
+    logging.getLogger('omero.gateway').setLevel(logging.INFO)
+    logging.getLogger('omero.client').setLevel(logging.INFO)
+    logging.getLogger('omero.util.Resources').setLevel(logging.INFO)
+
+    prepare_ingest_tracker_for_worker(config)
+
+
 def create_executor(config):
-    """Create a ProcessPoolExecutor with logging initialization."""
-    def init_worker():
-        import logging
-        import sys
-        log_level = config.get('log_level', 'INFO').upper()
-        log_file = config.get('log_file_path', 'logs/app.logs')
-        logging.basicConfig(
-            level=getattr(logging, log_level, logging.INFO),
-            format='%(asctime)s - PID:%(process)d - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file),
-                logging.StreamHandler(sys.stdout)
-            ]
-        )
-        # Add specific logger for ezomero
-        logging.getLogger('ezomero').setLevel(logging.DEBUG)
-        # Reduce noise from OMERO gateway during startup
-        logging.getLogger('omero.gateway').setLevel(logging.INFO)
-        logging.getLogger('omero.client').setLevel(logging.INFO)
-        logging.getLogger('omero.util.Resources').setLevel(logging.INFO)
+    """Create a ProcessPoolExecutor with per-worker initialization."""
     return ProcessPoolExecutor(
         max_workers=config.get('max_workers', 4),
-        initializer=init_worker
+        initializer=initialize_worker,
+        initargs=(config,),
     )
 
 
