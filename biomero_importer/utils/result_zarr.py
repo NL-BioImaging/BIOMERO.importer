@@ -370,18 +370,17 @@ def materialize_shallow_zarr(
     provider = identity_provider or IsccBioIdentityProvider()
     components = image.label_components
     if not components:
-        discovered = {
-            node.node_path: node
-            for node in discover_ngff_nodes(collection_root)
-            if node.role == "label"
-        }
         legacy_components = []
         for logical_path in image.label_node_paths:
-            node = discovered.get(logical_path)
-            if node is None:
+            if not _node_directory(collection_root, logical_path).is_dir():
                 raise PixelIdentityError(
                     f"Legacy shallow collection lost label {logical_path}"
                 )
+            node = NgffNode(
+                node_path=logical_path,
+                role="label",
+                parent_image_node_path=image.image_node_path,
+            )
             identity = _identity_for_node(collection_root, node, provider)
             legacy_components.append(ZarrLabelComponent(
                 logical_node_path=logical_path,

@@ -513,3 +513,55 @@ def test_materializes_original_with_inherited_and_local_labels(tmp_path):
     assert (
         returned / "labels/nuclei/0/0.0.0.0"
     ).read_bytes() == b"workflow-copy-of-nuclei"
+
+
+def test_materializes_legacy_shallow_manifest_without_component_records(
+    tmp_path,
+):
+    import_root = tmp_path / "data"
+    group_root = import_root / "Project A"
+    canonical = group_root / ".processed/Image-1.ome.zarr"
+    returned = import_root / "results/result.zarr"
+    _make_image(canonical)
+    _make_image(returned, labels=("cells",))
+    label_chunk = returned / "labels/cells/0/0.0.0.0"
+    label_chunk.write_bytes(b"legacy-cells")
+    decision = evaluate_returned_zarr(
+        returned,
+        _manifest(_input(0, "result.zarr")),
+        identity_provider=IdentityProvider(_identity()),
+    )
+    normalize_returned_zarr(
+        decision,
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    manifest_path = returned / ".biomero-shallow.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["images"][0].pop("labelComponents")
+    _write_json(manifest_path, manifest)
+    roots = {
+        "import-mount-data": import_root,
+        "group-0-data": group_root,
+    }
+    registration = resolve_shallow_registration(
+        returned / "labels/cells",
+        storage_roots=roots,
+        import_mount_path=import_root,
+    )
+    destination = tmp_path / "full.zarr"
+
+    result = materialize_shallow_zarr(
+        registration.reference,
+        destination,
+        roots,
+        identity_provider=IdentityProvider(_identity()),
+    )
+
+    assert (
+        destination / "labels/cells/0/0.0.0.0"
+    ).read_bytes() == b"legacy-cells"
+    assert result.labels[0].source == ManagedZarrNode(
+        storage_root="import-mount-data",
+        relative_path="results/result.zarr",
+        node_path="labels/cells",
+    )
