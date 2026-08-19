@@ -38,6 +38,8 @@ The system uses two main tables:
 - Stores all import orders and their progress
 - Tracks stages: "Import Pending" → "Import Started" → "Import Completed"/"Import Failed"
 - Includes full metadata: user, group, destination, files, timestamps
+- Stores optional Zarr registration choices in the nullable `import_options`
+  JSON text column. Existing orders without it behave exactly as before.
 
 ### `imports_preprocessing` 
 - Stores preprocessing configuration for containerized workflows
@@ -108,6 +110,22 @@ sample_user: "researcher"
 sample_parent_id: "151"
 sample_parent_type: "Dataset"  # or "Screen"
 ```
+
+### BIOMERO shallow Plate registration
+
+BIOMERO workflow result orders may include an `ImportOptions` object defined by
+`biomero-schema`. For a managed shallow Plate, the default
+`{"platePixelSource":"source"}` keeps the Plate/Well/WellSample hierarchy and
+registers each child Image against the managed canonical Plate pixels. The
+optional `{"platePixelSource":"label","plateLabelName":"nuclei"}` registers
+the same hierarchy against that label under every image node, producing a
+mask-backed Plate view without copying arrays. BIOMERO creates these orders;
+ordinary importer clients can omit `ImportOptions`.
+
+The shallow collection remains the authoritative in-place result and receives
+a compact Plate-level OMERO annotation. Label-backed registration requires the
+named label to exist on every Plate image and fails rather than guessing when
+the selection is incomplete or ambiguous.
 
 ### Using the System Check Script
 
@@ -673,5 +691,4 @@ py -3.12 -m venv .venv
 ## LICENSE
 
 License changed to GPL-2.0 (starting version 1.3), as this work depends on `omero-py` and `ezomero` libraries for the OMERO import and session management.
-
 
