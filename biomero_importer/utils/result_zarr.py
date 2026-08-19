@@ -22,6 +22,7 @@ from biomero_schema.zarr import (
     ShallowCollection,
     ShallowImageReference,
     ShallowZarrReference,
+    ZarrLabelComponent,
 )
 
 from .pixel_identity import (
@@ -49,6 +50,8 @@ class ReturnedZarrDecision:
     outcome: Literal["eligible", "keep-full", "skip-passthrough"]
     reason: str
     image_identities: tuple[PixelIdentity, ...] = ()
+    label_identities: tuple[PixelIdentity, ...] = ()
+    label_components: tuple[ZarrLabelComponent, ...] = ()
     label_node_paths: tuple[str, ...] = ()
     matched_inputs: tuple[CanonicalInput, ...] = ()
 
@@ -532,6 +535,7 @@ def normalize_returned_zarr(
             source=matched_input.source,
             returned_pixel_identity=returned_identity,
             label_node_paths=tuple(node.node_path for node in label_nodes),
+            label_components=decision.label_components,
         ),),
     )
     omitted = set(_declared_image_dataset_directories(
@@ -707,14 +711,58 @@ def evaluate_returned_zarr(
             image_identities=(returned_identity,),
             matched_inputs=matches,
         )
-    eligible = unchanged and bool(label_paths)
+    if not unchanged or not label_paths:
+        return ReturnedZarrDecision(
+            store_path=root,
+            outcome="keep-full",
+            reason=reason,
+            image_identities=(returned_identity,),
+            label_node_paths=label_paths,
+        )
+
+    try:
+        label_identities = tuple(
+            _identity_for_node(root, node, provider)
+            for node in nodes
+            if node.role == "label"
+        )
+    except PixelIdentityError as exc:
+        return ReturnedZarrDecision(
+            store_path=root,
+            outcome="keep-full",
+            reason=f"label-identity-unavailable: {exc}",
+            image_identities=(returned_identity,),
+            label_node_paths=label_paths,
+        )
+
+    input_labels = {
+        label.logical_node_path: label
+        for label in matches[0].labels
+    }
+    label_components = []
+    for identity in label_identities:
+        inherited = input_labels.get(identity.node_path)
+        source = None
+        if inherited is not None and pixel_identities_match(
+            identity,
+            inherited.pixel_identity,
+        ):
+            source = inherited.source
+        label_components.append(ZarrLabelComponent(
+            logical_node_path=identity.node_path,
+            pixel_identity=identity,
+            source=source,
+        ))
+
     return ReturnedZarrDecision(
         store_path=root,
-        outcome="eligible" if eligible else "keep-full",
+        outcome="eligible",
         reason=reason,
         image_identities=(returned_identity,),
+        label_identities=label_identities,
+        label_components=tuple(label_components),
         label_node_paths=label_paths,
-        matched_inputs=matches if eligible else (),
+        matched_inputs=matches,
     )
 
 

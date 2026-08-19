@@ -6,7 +6,9 @@ from biomero_schema.zarr import (
     CanonicalInput,
     CanonicalInputManifest,
     CanonicalZarrSource,
+    ManagedZarrNode,
     PixelIdentity,
+    ZarrLabelComponent,
 )
 
 from biomero_importer.utils.result_zarr import (
@@ -52,10 +54,14 @@ def _make_image(root: Path, node_path=".", labels=()) -> None:
             _make_image(root, f"{node_path}/labels/{label}".replace("./", ""))
 
 
-def _identity(instance="ISCC:IINSTANCE", node_path=".") -> PixelIdentity:
+def _identity(
+    instance="ISCC:IINSTANCE",
+    node_path=".",
+    role="image",
+) -> PixelIdentity:
     return PixelIdentity(
         node_path=node_path,
-        role="image",
+        role=role,
         iscc_code="ISCC:KSUM",
         data_code="ISCC:GDATA",
         instance_code=instance,
@@ -75,13 +81,19 @@ def _manifest(*items) -> CanonicalInputManifest:
     )
 
 
-def _input(ordinal, artifact=None, instance="ISCC:IINSTANCE") -> CanonicalInput:
+def _input(
+    ordinal,
+    artifact=None,
+    instance="ISCC:IINSTANCE",
+    labels=(),
+) -> CanonicalInput:
     identity = _identity(instance)
     return CanonicalInput(
         ordinal=ordinal,
         selected_object_type="Image",
         selected_object_id=ordinal + 1,
         transfer_artifact=artifact,
+        labels=labels,
         source=CanonicalZarrSource(
             storage_root="group-0-data",
             relative_path=f".processed/Image-{ordinal + 1}.ome.zarr",
@@ -108,6 +120,16 @@ class IdentityProvider:
             "node_path": kwargs["node_path"],
             "role": kwargs["role"],
         })
+
+
+class NodeIdentityProvider:
+    def __init__(self, identities):
+        self.identities = identities
+        self.calls = []
+
+    def generate(self, root, **kwargs):
+        self.calls.append((Path(root), kwargs))
+        return self.identities[kwargs["node_path"]]
 
 
 def test_discovers_image_and_declared_labels(tmp_path):
@@ -155,6 +177,70 @@ def test_transfer_artifact_disambiguates_duplicate_input_identities(tmp_path):
     assert decision.eligible
     assert decision.reason == "input-image-unchanged"
     assert decision.matched_inputs[0].ordinal == 1
+
+
+def test_classifies_inherited_new_and_changed_labels(tmp_path):
+    root = tmp_path / "result.zarr"
+    _make_image(root, labels=("nuclei", "cells", "foci"))
+    managed_nuclei = ZarrLabelComponent(
+        logical_node_path="labels/nuclei",
+        pixel_identity=_identity(
+            "ISCC:INUCLEI",
+            "labels/nuclei",
+            "label",
+        ),
+        source=ManagedZarrNode(
+            storage_root="import-mount-data",
+            relative_path="Project A/.analyzed/first/result.zarr",
+            node_path="labels/nuclei",
+        ),
+    )
+    managed_foci = ZarrLabelComponent(
+        logical_node_path="labels/foci",
+        pixel_identity=_identity("ISCC:IOLD", "labels/foci", "label"),
+        source=ManagedZarrNode(
+            storage_root="import-mount-data",
+            relative_path="Project A/.analyzed/first/result.zarr",
+            node_path="labels/foci",
+        ),
+    )
+    provider = NodeIdentityProvider({
+        ".": _identity(),
+        "labels/nuclei": _identity(
+            "ISCC:INUCLEI",
+            "labels/nuclei",
+            "label",
+        ),
+        "labels/cells": _identity(
+            "ISCC:ICELLS",
+            "labels/cells",
+            "label",
+        ),
+        "labels/foci": _identity(
+            "ISCC:ICHANGED",
+            "labels/foci",
+            "label",
+        ),
+    })
+
+    decision = evaluate_returned_zarr(
+        root,
+        _manifest(_input(
+            0,
+            "result.zarr",
+            labels=(managed_nuclei, managed_foci),
+        )),
+        identity_provider=provider,
+    )
+
+    assert decision.eligible
+    assert len(decision.label_identities) == 3
+    components = {
+        item.logical_node_path: item for item in decision.label_components
+    }
+    assert components["labels/nuclei"].source == managed_nuclei.source
+    assert components["labels/cells"].source is None
+    assert components["labels/foci"].source is None
 
 
 def test_legacy_duplicate_identities_are_ambiguous(tmp_path):
@@ -257,6 +343,10 @@ def test_normalization_transaction_keeps_labels_and_omits_image_chunks(
     )
     assert manifest["model"] == "rfc8-shallow-copy"
     assert manifest["images"][0]["source"]["sourceObjectId"] == 1
+    assert manifest["images"][0]["labelComponents"][0]["source"] is None
+    assert manifest["images"][0]["labelComponents"][0][
+        "pixelIdentity"
+    ]["role"] == "label"
     assert "multiscales" not in json.loads(
         (root / ".zattrs").read_text(encoding="utf-8")
     )
