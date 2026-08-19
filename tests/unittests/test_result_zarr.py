@@ -13,6 +13,7 @@ from biomero_importer.utils.result_zarr import (
     discover_ngff_nodes,
     evaluate_returned_zarr,
     find_returned_zarr_stores,
+    normalize_returned_zarr,
 )
 
 
@@ -42,6 +43,7 @@ def _make_image(root: Path, node_path=".", labels=()) -> None:
         "chunks": [1, 1, 8, 8],
         "dtype": "<u2",
     })
+    (node / "0" / "0.0.0.0").write_bytes(b"image-pixels" * 2048)
     if labels:
         _write_json(node / "labels" / ".zgroup", {"zarr_format": 2})
         _write_json(node / "labels" / ".zattrs", {"labels": list(labels)})
@@ -210,3 +212,68 @@ def test_store_finder_prunes_nested_label_zarrs(tmp_path):
         tmp_path / "second.zarr",
         outer,
     )
+
+
+def test_normalization_transaction_keeps_labels_and_omits_image_chunks(
+    tmp_path,
+):
+    root = tmp_path / "result.zarr"
+    _make_image(root, labels=("cells",))
+    label_chunk = root / "labels/cells/0/0.0.0.0"
+    label_chunk.write_bytes(b"label-pixels")
+    decision = evaluate_returned_zarr(
+        root,
+        _manifest(_input(0, "result.zarr")),
+        identity_provider=IdentityProvider(_identity()),
+    )
+
+    normalized = normalize_returned_zarr(
+        decision,
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+
+    assert not (root / "0").exists()
+    assert label_chunk.read_bytes() == b"label-pixels"
+    manifest = json.loads(
+        (root / ".biomero-shallow.json").read_text(encoding="utf-8")
+    )
+    assert manifest["model"] == "rfc8-shallow-copy"
+    assert manifest["images"][0]["source"]["sourceObjectId"] == 1
+    assert "multiscales" not in json.loads(
+        (root / ".zattrs").read_text(encoding="utf-8")
+    )
+    assert normalized.bytes_after < normalized.bytes_before
+    assert not list(tmp_path.glob(".result.zarr.biomero-*"))
+
+
+def test_normalization_restores_full_store_when_commit_rename_fails(tmp_path):
+    root = tmp_path / "result.zarr"
+    _make_image(root, labels=("cells",))
+    original_chunk = root / "0/0.0.0.0"
+    decision = evaluate_returned_zarr(
+        root,
+        _manifest(_input(0, "result.zarr")),
+        identity_provider=IdentityProvider(_identity()),
+    )
+    calls = 0
+
+    def fail_second_replace(source, target):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated commit failure")
+        source.replace(target)
+
+    try:
+        normalize_returned_zarr(
+            decision,
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            replace=fail_second_replace,
+        )
+    except OSError as exc:
+        assert "simulated commit failure" in str(exc)
+    else:
+        raise AssertionError("normalization unexpectedly succeeded")
+
+    assert original_chunk.read_bytes() == b"image-pixels" * 2048
+    assert not (root / ".biomero-shallow.json").exists()

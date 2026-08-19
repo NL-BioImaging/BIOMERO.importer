@@ -10,12 +10,17 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path, PurePosixPath
+import shutil
 from typing import Literal
+from uuid import UUID, uuid4
 
 from biomero_schema.zarr import (
     CanonicalInput,
     CanonicalInputManifest,
     PixelIdentity,
+    SHALLOW_COLLECTION_MANIFEST,
+    ShallowCollection,
+    ShallowImageReference,
 )
 
 from .pixel_identity import (
@@ -51,6 +56,16 @@ class ReturnedZarrDecision:
         return self.outcome == "eligible"
 
 
+@dataclass(frozen=True)
+class NormalizedShallowResult:
+    """Committed shallow collection and its measured storage reduction."""
+
+    store_path: Path
+    collection: ShallowCollection
+    bytes_before: int
+    bytes_after: int
+
+
 def _safe_node_path(value: str) -> str:
     if not value or "\\" in value:
         raise PixelIdentityError(f"Unsafe NGFF node path: {value!r}")
@@ -80,6 +95,15 @@ def _read_attrs(node: Path) -> dict:
     if not isinstance(value, dict):
         raise PixelIdentityError(f"Invalid NGFF attributes: {path}")
     return value
+
+
+def _write_json(path: Path, value: dict) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    temporary.write_text(
+        json.dumps(value, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
 
 
 def _discover_labels(root: Path, image_node_path: str) -> list[NgffNode]:
@@ -207,6 +231,194 @@ def _identity_for_node(
     )
 
 
+def _declared_image_dataset_directories(
+    root: Path,
+    image_node_path: str,
+) -> tuple[Path, ...]:
+    image_node = _node_directory(root, image_node_path)
+    attrs = _read_attrs(image_node)
+    multiscales = attrs.get("multiscales")
+    if not isinstance(multiscales, list) or not multiscales:
+        raise PixelIdentityError(
+            f"NGFF image node has no multiscales metadata: {image_node_path}"
+        )
+    directories = []
+    for multiscale in multiscales:
+        datasets = (
+            multiscale.get("datasets")
+            if isinstance(multiscale, dict)
+            else None
+        )
+        if not isinstance(datasets, list) or not datasets:
+            raise PixelIdentityError(
+                f"NGFF multiscales has no datasets: {image_node_path}"
+            )
+        for dataset in datasets:
+            dataset_path = (
+                dataset.get("path") if isinstance(dataset, dict) else None
+            )
+            if not isinstance(dataset_path, str):
+                raise PixelIdentityError(
+                    f"NGFF dataset path is missing: {image_node_path}"
+                )
+            dataset_path = _safe_node_path(dataset_path)
+            directory = _node_directory(
+                root,
+                _join_node_path(image_node_path, dataset_path),
+            )
+            try:
+                directory.relative_to(root)
+            except ValueError as exc:
+                raise PixelIdentityError(
+                    f"NGFF dataset escapes its store: {dataset_path}"
+                ) from exc
+            directories.append(directory)
+    return tuple(dict.fromkeys(directories))
+
+
+def _tree_size(root: Path) -> int:
+    return sum(
+        path.stat().st_size
+        for path in root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+
+
+def normalize_returned_zarr(
+    decision: ReturnedZarrDecision,
+    workflow_id: UUID | str,
+    *,
+    replace=os.replace,
+) -> NormalizedShallowResult:
+    """Transactionally omit a verified duplicate image from a result store.
+
+    A new sibling store is assembled from metadata and retained labels. Only
+    after that store and its manifest validate do atomic renames make it live.
+    The canonical source is never modified. Unsupported inputs raise before
+    the original result is moved.
+    """
+    if not decision.eligible or len(decision.matched_inputs) != 1:
+        raise PixelIdentityError("Returned Zarr is not eligible for shallowing")
+    if len(decision.image_identities) != 1:
+        raise PixelIdentityError("Expected exactly one returned image identity")
+
+    root = decision.store_path
+    if not root.is_dir():
+        raise PixelIdentityError(f"Returned Zarr does not exist: {root}")
+    nodes = discover_ngff_nodes(root)
+    image_nodes = tuple(node for node in nodes if node.role == "image")
+    label_nodes = tuple(node for node in nodes if node.role == "label")
+    if len(image_nodes) != 1 or not label_nodes:
+        raise PixelIdentityError(
+            "Only one-image returned stores with declared labels can be "
+            "normalized in this implementation"
+        )
+
+    image_node = image_nodes[0]
+    returned_identity = decision.image_identities[0]
+    if returned_identity.node_path != image_node.node_path:
+        raise PixelIdentityError(
+            "Returned identity no longer describes the discovered image node"
+        )
+    matched_input = decision.matched_inputs[0]
+    if matched_input.transfer_artifact != root.name:
+        raise PixelIdentityError(
+            "Returned store name no longer matches its transferred artifact"
+        )
+
+    collection = ShallowCollection(
+        workflow_id=UUID(str(workflow_id)),
+        transfer_artifact=root.name,
+        interchange_profile=matched_input.source.interchange_profile,
+        images=(ShallowImageReference(
+            image_node_path=image_node.node_path,
+            source=matched_input.source,
+            returned_pixel_identity=returned_identity,
+            label_node_paths=tuple(node.node_path for node in label_nodes),
+        ),),
+    )
+    omitted = set(_declared_image_dataset_directories(
+        root,
+        image_node.node_path,
+    ))
+    token = uuid4().hex
+    staging = root.with_name(f".{root.name}.biomero-stage-{token}")
+    backup = root.with_name(f".{root.name}.biomero-full-{token}")
+    bytes_before = _tree_size(root)
+
+    def ignore(directory, names):
+        current = Path(directory)
+        return {
+            name for name in names
+            if current / name in omitted
+        }
+
+    moved_original = False
+    committed = False
+    try:
+        shutil.copytree(root, staging, symlinks=True, ignore=ignore)
+        staging_attrs_path = _node_directory(
+            staging,
+            image_node.node_path,
+        ) / ".zattrs"
+        staging_attrs = _read_attrs(staging_attrs_path.parent)
+        staging_attrs.pop("multiscales", None)
+        staging_attrs["biomero"] = {
+            "model": collection.model,
+            "manifest": SHALLOW_COLLECTION_MANIFEST,
+            "workflowId": str(collection.workflow_id),
+        }
+        _write_json(staging_attrs_path, staging_attrs)
+        _write_json(
+            staging / SHALLOW_COLLECTION_MANIFEST,
+            collection.to_dict(),
+        )
+
+        validated = ShallowCollection.from_dict(json.loads(
+            (staging / SHALLOW_COLLECTION_MANIFEST).read_text(
+                encoding="utf-8"
+            )
+        ))
+        if validated != collection:
+            raise PixelIdentityError("Shallow collection manifest changed")
+        for label in label_nodes:
+            label_dir = _node_directory(staging, label.node_path)
+            if not label_dir.is_dir():
+                raise PixelIdentityError(
+                    f"Staged shallow result lost label node {label.node_path}"
+                )
+        for dataset in omitted:
+            staged_dataset = staging / dataset.relative_to(root)
+            if staged_dataset.exists():
+                raise PixelIdentityError(
+                    f"Staged shallow result retained image dataset {dataset}"
+                )
+
+        replace(root, backup)
+        moved_original = True
+        try:
+            replace(staging, root)
+            committed = True
+        except Exception:
+            replace(backup, root)
+            moved_original = False
+            raise
+        bytes_after = _tree_size(root)
+        shutil.rmtree(backup)
+        moved_original = False
+        return NormalizedShallowResult(
+            store_path=root,
+            collection=collection,
+            bytes_before=bytes_before,
+            bytes_after=bytes_after,
+        )
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if moved_original and not committed and backup.exists() and not root.exists():
+            replace(backup, root)
+
+
 def evaluate_returned_zarr(
     zarr_root: str | Path,
     canonical_inputs: CanonicalInputManifest | None,
@@ -309,8 +521,10 @@ def evaluate_returned_zarr(
 
 __all__ = [
     "NgffNode",
+    "NormalizedShallowResult",
     "ReturnedZarrDecision",
     "discover_ngff_nodes",
     "evaluate_returned_zarr",
     "find_returned_zarr_stores",
+    "normalize_returned_zarr",
 ]
