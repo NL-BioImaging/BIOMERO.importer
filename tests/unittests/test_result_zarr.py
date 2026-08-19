@@ -289,6 +289,35 @@ def test_normalizes_plate_images_and_retains_image_level_label(tmp_path):
     assert images["B/1/0"].label_node_paths == ()
 
 
+def test_normalizes_renamed_plate_output_by_pixel_identity(tmp_path):
+    root = tmp_path / "plate__segmentation.ome.zarr"
+    _make_plate(root, {"A/1/0": ("cells",)})
+    label_path = "A/1/0/labels/cells"
+    provider = NodeIdentityProvider({
+        "A/1/0": _identity("ISCC:IA", "A/1/0"),
+        "B/1/0": _identity("ISCC:IB", "B/1/0"),
+        label_path: _identity("ISCC:ICELLS", label_path, "label"),
+    })
+    decision = evaluate_returned_zarr(
+        root,
+        _manifest(_plate_input()),
+        identity_provider=provider,
+    )
+
+    normalized = normalize_returned_zarr(
+        decision,
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+
+    assert decision.eligible
+    assert decision.matched_inputs[0].transfer_artifact == "plate.zarr"
+    assert normalized.collection.transfer_artifact == root.name
+    assert (root / ".biomero-shallow.json").is_file()
+    assert not (root / "A/1/0/0").exists()
+    assert not (root / "B/1/0/0").exists()
+    assert (root / label_path).is_dir()
+
+
 def test_transfer_artifact_disambiguates_duplicate_input_identities(tmp_path):
     root = tmp_path / "second.zarr"
     _make_image(root, labels=("cells",))

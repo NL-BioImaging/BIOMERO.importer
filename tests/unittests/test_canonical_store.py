@@ -25,6 +25,9 @@ CANONICAL_MARKER_NAME = canonical_store.CANONICAL_MARKER_NAME
 CanonicalCreationLocked = canonical_store.CanonicalCreationLocked
 CanonicalStore = canonical_store.CanonicalStore
 InvalidCanonicalStore = canonical_store.InvalidCanonicalStore
+external_canonical_marker_path = canonical_store.external_canonical_marker_path
+load_canonical_marker = canonical_store.load_canonical_marker
+write_indexed_canonical_marker = canonical_store.write_indexed_canonical_marker
 
 
 @pytest.fixture
@@ -153,6 +156,51 @@ def test_atomically_promotes_zarr_with_committed_marker(
     )
     assert marker["state"] == "committed"
     assert marker["source"] == source_record
+
+
+def test_indexes_native_zarr_with_external_marker(tmp_path, source_record):
+    native = tmp_path / "incoming.ome.zarr"
+    make_zarr_v2(native)
+
+    marker_path = write_indexed_canonical_marker(native, source_record)
+
+    assert marker_path == (
+        tmp_path / ".biomero/incoming.ome.zarr.canonical.json"
+    )
+    assert not (native / CANONICAL_MARKER_NAME).exists()
+    assert load_canonical_marker(native) == CanonicalZarrSource.from_dict(
+        source_record
+    )
+
+
+def test_external_marker_round_trips_plate_identity_inventory(
+    tmp_path, source_record
+):
+    native = tmp_path / "plate.ome.zarr"
+    make_zarr_v2(native)
+    plate_image_source = CanonicalZarrSource.from_dict({
+        **source_record,
+        "relativePath": "plate.ome.zarr",
+        "nodePath": "A/1/0",
+        "sourceObjectType": "Plate",
+        "sourceObjectId": 9,
+        "canonicalPixelVerified": False,
+    })
+    plate = CanonicalPlateSource(
+        storageRoot="group-5-data",
+        relativePath="plate.ome.zarr",
+        sourceObjectId=9,
+        sourceGeneration=1,
+        interchangeProfile="ngff-0.4-zarr-v2",
+        images=(CanonicalPlateImage(
+            imageNodePath="A/1/0",
+            source=plate_image_source,
+        ),),
+    )
+
+    write_indexed_canonical_marker(native, plate)
+
+    assert load_canonical_marker(native) == plate
 
 
 def test_promotes_across_filesystems_via_destination_staging(

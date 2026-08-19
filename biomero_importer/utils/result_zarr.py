@@ -939,14 +939,6 @@ def normalize_returned_zarr(
             "Returned identities no longer describe the discovered image nodes"
         )
     matched_input = decision.matched_inputs[0]
-    if (
-        matched_input.transfer_artifact is not None
-        and matched_input.transfer_artifact != root.name
-    ):
-        raise PixelIdentityError(
-            "Returned store name no longer matches its transferred artifact"
-        )
-
     if matched_input.plate_source is not None:
         input_sources = {
             image.image_node_path: image.source

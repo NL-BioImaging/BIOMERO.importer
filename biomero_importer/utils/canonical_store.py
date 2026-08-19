@@ -14,6 +14,7 @@ from biomero_schema.zarr import CanonicalPlateSource, CanonicalZarrSource
 
 CANONICAL_MARKER_NAME = ".biomero-canonical.json"
 CANONICAL_MARKER_SCHEMA = 1
+CANONICAL_METADATA_DIRECTORY = ".biomero"
 PROCESSED_DATA_FOLDER = ".processed"
 CanonicalSourceLike = Union[
     CanonicalZarrSource,
@@ -234,3 +235,76 @@ class CanonicalStore:
         raise InvalidCanonicalStore(
             f"Path is not a supported Zarr or bioformats2raw layout: {path}"
         )
+
+
+def external_canonical_marker_path(zarr_path: Union[str, Path]) -> Path:
+    """Return the managed sidecar path without writing into source pixels."""
+    zarr_path = Path(zarr_path)
+    return (
+        zarr_path.parent
+        / CANONICAL_METADATA_DIRECTORY
+        / f"{zarr_path.name}.canonical.json"
+    )
+
+
+def write_indexed_canonical_marker(
+    zarr_path: Union[str, Path],
+    source: CanonicalSourceLike,
+) -> Path:
+    """Atomically persist detailed identities beside an indexed managed Zarr."""
+    zarr_path = Path(zarr_path).resolve()
+    CanonicalStore._validate_zarr(zarr_path)
+    marker_path = external_canonical_marker_path(zarr_path)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker = {
+        "markerSchema": CANONICAL_MARKER_SCHEMA,
+        "state": "committed",
+        "source": _source_payload(source),
+    }
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{marker_path.name}.",
+        suffix=".tmp",
+        dir=marker_path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(marker, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, marker_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return marker_path
+
+
+def load_canonical_marker(
+    zarr_path: Union[str, Path],
+) -> Optional[Union[CanonicalZarrSource, CanonicalPlateSource]]:
+    """Load a committed internal or non-invasive external canonical marker."""
+    zarr_path = Path(zarr_path).resolve()
+    candidates = (
+        zarr_path / CANONICAL_MARKER_NAME,
+        external_canonical_marker_path(zarr_path),
+    )
+    marker_path = next((path for path in candidates if path.is_file()), None)
+    if marker_path is None:
+        return None
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InvalidCanonicalStore(
+            f"Canonical marker is unreadable: {marker_path}"
+        ) from exc
+    if (
+        marker.get("markerSchema") != CANONICAL_MARKER_SCHEMA
+        or marker.get("state") != "committed"
+        or not isinstance(marker.get("source"), dict)
+    ):
+        raise InvalidCanonicalStore(
+            f"Canonical marker is not committed: {marker_path}"
+        )
+    payload = marker["source"]
+    if "images" in payload and "sourceObjectType" not in payload:
+        return CanonicalPlateSource.from_dict(payload)
+    return CanonicalZarrSource.from_dict(payload)
