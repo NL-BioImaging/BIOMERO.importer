@@ -4,7 +4,12 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-from biomero_schema.zarr import CanonicalZarrSource
+from biomero_schema.zarr import (
+    CanonicalPlateImage,
+    CanonicalPlateSource,
+    CanonicalZarrSource,
+    PixelIdentity,
+)
 
 MODULE_PATH = (
     Path(__file__).parents[2]
@@ -77,6 +82,50 @@ def test_accepts_shared_pydantic_source_contract(tmp_path, source_record):
 
     assert destination == (
         tmp_path / "project/.processed/Image-3207.g1.ome.zarr"
+    )
+
+
+def test_accepts_shared_plate_source_contract(tmp_path):
+    identity = PixelIdentity(
+        node_path="A/1/0",
+        role="image",
+        iscc="ISCC:KPIXEL",
+        dataCode="ISCC:GDATA",
+        instanceCode="ISCC:IINSTANCE",
+        toolVersion="0.1.0",
+        imagewalkRevision="draft-2026-06",
+        shape=(1, 1, 16, 16),
+        dtype="uint16",
+        axes=("t", "c", "y", "x"),
+    )
+    image_source = CanonicalZarrSource(
+        storageRoot="group-5-data",
+        relativePath="project/.processed/Plate-9.g1.ome.zarr",
+        nodePath="A/1/0",
+        sourceObjectType="Plate",
+        sourceObjectId=9,
+        sourceGeneration=1,
+        interchangeProfile="ngff-0.4-zarr-v2",
+        pixelIdentity=identity,
+        pixelIdentityOrigin="canonical-bootstrap",
+        canonicalPixelVerified=False,
+    )
+    plate = CanonicalPlateSource(
+        storageRoot="group-5-data",
+        relativePath="project/.processed/Plate-9.g1.ome.zarr",
+        sourceObjectId=9,
+        sourceGeneration=1,
+        interchangeProfile="ngff-0.4-zarr-v2",
+        images=(CanonicalPlateImage(
+            imageNodePath="A/1/0",
+            source=image_source,
+        ),),
+    )
+
+    destination = CanonicalStore(tmp_path).destination_for(plate)
+
+    assert destination == (
+        tmp_path / "project/.processed/Plate-9.g1.ome.zarr"
     )
 
 

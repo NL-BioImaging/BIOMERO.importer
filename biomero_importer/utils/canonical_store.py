@@ -9,19 +9,25 @@ import shutil
 import tempfile
 from typing import Any, Iterator, Mapping, Optional, Union
 
-from biomero_schema.zarr import CanonicalZarrSource
+from biomero_schema.zarr import CanonicalPlateSource, CanonicalZarrSource
 
 
 CANONICAL_MARKER_NAME = ".biomero-canonical.json"
 CANONICAL_MARKER_SCHEMA = 1
 PROCESSED_DATA_FOLDER = ".processed"
-CanonicalSourceLike = Union[CanonicalZarrSource, Mapping[str, Any]]
+CanonicalSourceLike = Union[
+    CanonicalZarrSource,
+    CanonicalPlateSource,
+    Mapping[str, Any],
+]
 
 
 def _source_payload(source: CanonicalSourceLike) -> dict[str, Any]:
     """Return the shared schema's stable wire representation."""
-    if isinstance(source, CanonicalZarrSource):
+    if isinstance(source, (CanonicalZarrSource, CanonicalPlateSource)):
         return source.to_dict()
+    if "images" in source and "sourceObjectType" not in source:
+        return CanonicalPlateSource.from_dict(source).to_dict()
     return CanonicalZarrSource.from_dict(source).to_dict()
 
 
@@ -80,7 +86,7 @@ class CanonicalStore:
         source_payload = _source_payload(source)
         destination = self.resolve(str(source_payload["relativePath"]))
         expected_name = self.canonical_name(
-            str(source_payload["sourceObjectType"]),
+            str(source_payload.get("sourceObjectType", "Plate")),
             int(source_payload["sourceObjectId"]),
             int(source_payload["sourceGeneration"]),
         )
