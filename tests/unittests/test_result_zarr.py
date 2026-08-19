@@ -15,6 +15,7 @@ from biomero_importer.utils.result_zarr import (
     discover_ngff_nodes,
     evaluate_returned_zarr,
     find_returned_zarr_stores,
+    materialize_shallow_zarr,
     normalize_returned_zarr,
     resolve_shallow_registration,
 )
@@ -433,3 +434,82 @@ def test_shallow_registration_returns_none_outside_import_mount(tmp_path):
         tmp_path / "outside.zarr",
         import_mount_path=tmp_path / "data",
     ) is None
+
+
+def test_materializes_original_with_inherited_and_local_labels(tmp_path):
+    import_root = tmp_path / "data"
+    canonical = import_root / "Project A/.processed/Image-1.ome.zarr"
+    prior = import_root / "Project A/.analyzed/first/result.zarr"
+    returned = import_root / "results/result.zarr"
+    _make_image(canonical)
+    _make_image(prior, labels=("nuclei",))
+    _make_image(returned, labels=("nuclei", "cells"))
+    (prior / "labels/nuclei/0/0.0.0.0").write_bytes(b"prior-nuclei")
+    (returned / "labels/nuclei/0/0.0.0.0").write_bytes(
+        b"workflow-copy-of-nuclei"
+    )
+    (returned / "labels/cells/0/0.0.0.0").write_bytes(b"new-cells")
+    nuclei_identity = _identity(
+        "ISCC:INUCLEI", "labels/nuclei", "label"
+    )
+    input_nuclei = ZarrLabelComponent(
+        logical_node_path="labels/nuclei",
+        pixel_identity=nuclei_identity,
+        source=ManagedZarrNode(
+            storage_root="group-0-data",
+            relative_path=".analyzed/first/result.zarr",
+            node_path="labels/nuclei",
+        ),
+    )
+    provider = NodeIdentityProvider({
+        ".": _identity(),
+        "labels/nuclei": nuclei_identity,
+        "labels/cells": _identity(
+            "ISCC:ICELLS", "labels/cells", "label"
+        ),
+    })
+    decision = evaluate_returned_zarr(
+        returned,
+        _manifest(_input(
+            0,
+            "result.zarr",
+            labels=(input_nuclei,),
+        )),
+        identity_provider=provider,
+    )
+    normalize_returned_zarr(
+        decision,
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    roots = {
+        "import-mount-data": import_root,
+        "group-0-data": import_root / "Project A",
+    }
+    registration = resolve_shallow_registration(
+        returned / "labels/cells",
+        storage_roots=roots,
+        import_mount_path=import_root,
+    )
+    destination = tmp_path / "transfer/result.zarr"
+    destination.parent.mkdir()
+
+    result = materialize_shallow_zarr(
+        registration.reference,
+        destination,
+        roots,
+    )
+
+    assert (destination / "0/0.0.0.0").read_bytes() == b"image-pixels" * 2048
+    assert (
+        destination / "labels/nuclei/0/0.0.0.0"
+    ).read_bytes() == b"prior-nuclei"
+    assert (
+        destination / "labels/cells/0/0.0.0.0"
+    ).read_bytes() == b"new-cells"
+    assert json.loads(
+        (destination / "labels/.zattrs").read_text(encoding="utf-8")
+    ) == {"labels": ["nuclei", "cells"]}
+    assert all(label.source is not None for label in result.labels)
+    assert (
+        returned / "labels/nuclei/0/0.0.0.0"
+    ).read_bytes() == b"workflow-copy-of-nuclei"

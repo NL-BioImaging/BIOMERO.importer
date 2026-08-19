@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 from biomero_schema.zarr import (
     CanonicalInput,
     CanonicalInputManifest,
+    ManagedZarrNode,
     PixelIdentity,
     SHALLOW_COLLECTION_MANIFEST,
     ShallowCollection,
@@ -82,6 +83,15 @@ class ShallowRegistration:
     registration_path: Path
     reference: ShallowZarrReference
     kind: Literal["primary", "label"]
+
+
+@dataclass(frozen=True)
+class MaterializedShallowResult:
+    """A full temporary workflow input reconstructed from managed components."""
+
+    destination: Path
+    collection: ShallowCollection
+    labels: tuple[ZarrLabelComponent, ...]
 
 
 def _safe_node_path(value: str) -> str:
@@ -303,6 +313,155 @@ def resolve_shallow_registration(
         registration_path=registration_path,
         reference=reference,
         kind=kind,
+    )
+
+
+def materialize_shallow_zarr(
+    reference: ShallowZarrReference,
+    destination: str | Path,
+    storage_roots: dict[str, Path],
+    *,
+    identity_provider: IsccBioIdentityProvider | None = None,
+    replace=os.replace,
+) -> MaterializedShallowResult:
+    """Build a conventional image-plus-label Zarr from a shallow reference.
+
+    The managed source and collections are read-only. The destination is
+    assembled as a sibling staging directory and atomically renamed only after
+    every declared label has been copied and its stable source recorded.
+    """
+    destination = Path(destination)
+    if destination.exists():
+        raise PixelIdentityError(
+            f"Shallow materialization destination already exists: {destination}"
+        )
+    collection_root = resolve_managed_source_path(reference, storage_roots)
+    manifest_path = collection_root / SHALLOW_COLLECTION_MANIFEST
+    try:
+        collection = ShallowCollection.from_dict(json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        ))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise PixelIdentityError(
+            f"Invalid shallow collection manifest: {manifest_path}"
+        ) from exc
+    matches = [
+        image for image in collection.images
+        if image.image_node_path == reference.image_node_path
+    ]
+    if len(matches) != 1:
+        raise PixelIdentityError(
+            "Shallow reference must identify exactly one collection image"
+        )
+    image = matches[0]
+    if (
+        image.source != reference.source
+        or set(image.label_node_paths) != set(reference.label_node_paths)
+    ):
+        raise PixelIdentityError(
+            "Shallow reference no longer matches its collection manifest"
+        )
+    if image.image_node_path != "." or image.source.node_path != ".":
+        raise PixelIdentityError(
+            "Materialization currently supports one root-level NGFF image"
+        )
+
+    canonical_root = resolve_managed_source_path(image.source, storage_roots)
+    provider = identity_provider or IsccBioIdentityProvider()
+    components = image.label_components
+    if not components:
+        discovered = {
+            node.node_path: node
+            for node in discover_ngff_nodes(collection_root)
+            if node.role == "label"
+        }
+        legacy_components = []
+        for logical_path in image.label_node_paths:
+            node = discovered.get(logical_path)
+            if node is None:
+                raise PixelIdentityError(
+                    f"Legacy shallow collection lost label {logical_path}"
+                )
+            identity = _identity_for_node(collection_root, node, provider)
+            legacy_components.append(ZarrLabelComponent(
+                logical_node_path=logical_path,
+                pixel_identity=identity,
+            ))
+        components = tuple(legacy_components)
+
+    token = uuid4().hex
+    staging = destination.with_name(
+        f".{destination.name}.biomero-materialize-{token}"
+    )
+    source_labels = canonical_root / "labels"
+
+    def ignore(directory, names):
+        current = Path(directory)
+        ignored = {".biomero-canonical.json"}.intersection(names)
+        if current == canonical_root and source_labels.name in names:
+            ignored.add(source_labels.name)
+        return ignored
+
+    managed_labels = []
+    try:
+        shutil.copytree(canonical_root, staging, symlinks=True, ignore=ignore)
+        labels_root = staging / "labels"
+        labels_root.mkdir(parents=True, exist_ok=False)
+        _write_json(labels_root / ".zgroup", {"zarr_format": 2})
+        label_names = []
+        for component in components:
+            prefix = PurePosixPath("labels")
+            logical = PurePosixPath(component.logical_node_path)
+            try:
+                label_name = logical.relative_to(prefix).as_posix()
+            except ValueError as exc:
+                raise PixelIdentityError(
+                    "Root-image label paths must be nested below labels/"
+                ) from exc
+            label_names.append(label_name)
+            if component.source is None:
+                physical_root = collection_root
+                physical_node = component.logical_node_path
+                managed_source = ManagedZarrNode(
+                    storage_root=reference.storage_root,
+                    relative_path=reference.relative_path,
+                    node_path=component.logical_node_path,
+                )
+            else:
+                physical_root = resolve_managed_source_path(
+                    component.source,
+                    storage_roots,
+                )
+                physical_node = component.source.node_path
+                managed_source = component.source
+            physical_path = _node_directory(physical_root, physical_node)
+            if not physical_path.is_dir():
+                raise PixelIdentityError(
+                    f"Managed shallow label is unavailable: {physical_path}"
+                )
+            target = _node_directory(staging, component.logical_node_path)
+            shutil.copytree(physical_path, target, symlinks=True)
+            managed_labels.append(component.model_copy(update={
+                "source": managed_source,
+            }))
+        _write_json(labels_root / ".zattrs", {"labels": label_names})
+        discovered_paths = {
+            node.node_path for node in discover_ngff_nodes(staging)
+            if node.role == "label"
+        }
+        if discovered_paths != set(image.label_node_paths):
+            raise PixelIdentityError(
+                "Materialized label inventory differs from shallow collection"
+            )
+        replace(staging, destination)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+
+    return MaterializedShallowResult(
+        destination=destination,
+        collection=collection,
+        labels=tuple(managed_labels),
     )
 
 
@@ -768,6 +927,7 @@ def evaluate_returned_zarr(
 
 __all__ = [
     "NgffNode",
+    "MaterializedShallowResult",
     "NormalizedShallowResult",
     "ReturnedZarrDecision",
     "ShallowRegistration",
@@ -775,6 +935,7 @@ __all__ = [
     "evaluate_returned_zarr",
     "find_returned_zarr_stores",
     "load_managed_storage_roots",
+    "materialize_shallow_zarr",
     "normalize_returned_zarr",
     "resolve_managed_source_path",
     "resolve_shallow_registration",
