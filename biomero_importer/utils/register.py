@@ -20,6 +20,7 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 from urllib.parse import urlsplit
+from copy import copy
 import zarr
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.sync import sync
@@ -602,8 +603,42 @@ def register_plate(conn, store, args, attrs):
 
             img_attrs = load_attrs(store, image_path)
             image_name = img_attrs.get('name', f"{well_path}/{sample_attrs['path']}")
-
-            image, rnd_def = create_image(conn, store, img_attrs, image_name, families, models, args, image_path)
+            label_sources = getattr(args, "plate_label_paths", {})
+            label_name = getattr(args, "plate_label_name", None)
+            label_path = label_sources.get(image_path.rstrip("/"))
+            if label_name is not None and label_path is None:
+                raise ValueError(
+                    f"Plate image {image_path} has no mapped label "
+                    f"source for {label_name!r}"
+                )
+            if label_path is not None:
+                label_store = zarr.storage.LocalStore(
+                    str(label_path),
+                    read_only=True,
+                )
+                label_attrs = load_attrs(label_store)
+                label_args = copy(args)
+                label_args.uri = str(label_path)
+                image, rnd_def = create_image(
+                    conn,
+                    label_store,
+                    label_attrs,
+                    f"{image_name} [{label_name}]",
+                    families,
+                    models,
+                    label_args,
+                )
+            else:
+                image, rnd_def = create_image(
+                    conn,
+                    store,
+                    img_attrs,
+                    image_name,
+                    families,
+                    models,
+                    args,
+                    image_path,
+                )
 
             images_to_save.append(image)
             if rnd_def is not None:
@@ -844,4 +879,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

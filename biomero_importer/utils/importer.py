@@ -609,12 +609,25 @@ class DataPackageImporter:
         logical_uri = str(uri)
         file_title = os.path.splitext(os.path.basename(logical_uri))[0].rstrip('.ome')
         shallow_registration = None
+        import_options = None
         if SHALLOW_ZARR_ENABLED:
+            from biomero_schema.zarr import ZarrImportOptions
             from .result_zarr import resolve_shallow_registration
 
-            shallow_registration = resolve_shallow_registration(logical_uri)
+            import_options = ZarrImportOptions.from_dict(
+                self.data_package.get("ImportOptions", {})
+            )
+            shallow_registration = resolve_shallow_registration(
+                logical_uri,
+                import_options=import_options,
+            )
             if shallow_registration is not None:
                 uri = str(shallow_registration.registration_path)
+                if shallow_registration.plate_label_name is not None:
+                    file_title = (
+                        f"{file_title} "
+                        f"[{shallow_registration.plate_label_name}]"
+                    )
                 self.logger.info(
                     "Resolved %s shallow Zarr registration %s to pixel backing %s",
                     shallow_registration.kind,
@@ -622,8 +635,22 @@ class DataPackageImporter:
                     uri,
                 )
 
-        args = SimpleNamespace(uri=uri, endpoint=endpoint, name=file_title,
-                               nosignrequest=nosignrequest, target=str(target), target_by_name=target_by_name)
+        args = SimpleNamespace(
+            uri=uri,
+            endpoint=endpoint,
+            name=file_title,
+            nosignrequest=nosignrequest,
+            target=str(target),
+            target_by_name=target_by_name,
+            plate_label_paths=(
+                dict(shallow_registration.plate_label_paths)
+                if shallow_registration is not None else {}
+            ),
+            plate_label_name=(
+                shallow_registration.plate_label_name
+                if shallow_registration is not None else None
+            ),
+        )
 
         # --- start copy from register.main() ---
 

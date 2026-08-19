@@ -558,6 +558,69 @@ def test_resolves_primary_and_label_registration_views(tmp_path):
     assert label.reference == primary.reference
 
 
+def test_resolves_source_and_label_backed_plate_registration(tmp_path):
+    import_root = tmp_path / "data"
+    group_root = import_root / "Project A"
+    canonical = group_root / ".processed/Plate-1.ome.zarr"
+    returned = import_root / "results/plate.zarr"
+    labels_by_image = {
+        "A/1/0": ("nuclei",),
+        "B/1/0": ("nuclei",),
+    }
+    _make_plate(canonical)
+    _make_plate(returned, labels_by_image)
+    provider = NodeIdentityProvider({
+        "A/1/0": _identity("ISCC:IA", "A/1/0"),
+        "B/1/0": _identity("ISCC:IB", "B/1/0"),
+        "A/1/0/labels/nuclei": _identity(
+            "ISCC:ILABELA", "A/1/0/labels/nuclei", "label"
+        ),
+        "B/1/0/labels/nuclei": _identity(
+            "ISCC:ILABELB", "B/1/0/labels/nuclei", "label"
+        ),
+    })
+    decision = evaluate_returned_zarr(
+        returned,
+        _manifest(_plate_input()),
+        identity_provider=provider,
+    )
+    normalize_returned_zarr(
+        decision,
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    roots = {
+        "import-mount-data": import_root,
+        "group-0-data": group_root,
+    }
+
+    source = resolve_shallow_registration(
+        returned,
+        storage_roots=roots,
+        import_mount_path=import_root,
+    )
+    label = resolve_shallow_registration(
+        returned,
+        storage_roots=roots,
+        import_mount_path=import_root,
+        import_options={
+            "schema": 1,
+            "platePixelSource": "label",
+            "plateLabelName": "nuclei",
+        },
+    )
+
+    assert source.kind == "plate"
+    assert source.registration_path == canonical.resolve()
+    assert source.reference.source_object_id == 1
+    assert source.reference.image_node_count == 2
+    assert source.plate_label_paths == ()
+    assert dict(label.plate_label_paths) == {
+        "A/1/0": (returned / "A/1/0/labels/nuclei").resolve(),
+        "B/1/0": (returned / "B/1/0/labels/nuclei").resolve(),
+    }
+    assert label.plate_label_name == "nuclei"
+
+
 def test_shallow_registration_returns_none_outside_import_mount(tmp_path):
     assert resolve_shallow_registration(
         tmp_path / "outside.zarr",

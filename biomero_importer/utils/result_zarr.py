@@ -22,7 +22,9 @@ from biomero_schema.zarr import (
     SHALLOW_COLLECTION_MANIFEST,
     ShallowCollection,
     ShallowImageReference,
+    ShallowPlateReference,
     ShallowZarrReference,
+    ZarrImportOptions,
     ZarrLabelComponent,
 )
 
@@ -81,8 +83,10 @@ class ShallowRegistration:
 
     collection_root: Path
     registration_path: Path
-    reference: ShallowZarrReference
-    kind: Literal["primary", "label"]
+    reference: ShallowZarrReference | ShallowPlateReference
+    kind: Literal["primary", "label", "plate"]
+    plate_label_paths: tuple[tuple[str, Path], ...] = ()
+    plate_label_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +231,7 @@ def resolve_shallow_registration(
     *,
     storage_roots: dict[str, Path] | None = None,
     import_mount_path: str | Path | None = None,
+    import_options: ZarrImportOptions | dict | None = None,
 ) -> ShallowRegistration | None:
     """Resolve a primary shallow result or one of its label projections."""
     path = Path(zarr_path).resolve()
@@ -263,14 +268,88 @@ def resolve_shallow_registration(
             f"Invalid shallow collection manifest: {collection_root}"
         ) from exc
 
+    options = (
+        import_options
+        if isinstance(import_options, ZarrImportOptions)
+        else ZarrImportOptions.from_dict(import_options or {})
+    )
+    roots = storage_roots or load_managed_storage_roots(
+        import_mount_path=import_root
+    )
     relative_node = (
         "." if path == collection_root
         else path.relative_to(collection_root).as_posix()
     )
     if relative_node == ".":
-        if len(collection.images) != 1:
+        source_types = {
+            image.source.source_object_type for image in collection.images
+        }
+        if source_types == {"Plate"}:
+            reference = ShallowPlateReference.from_collection(
+                collection,
+                storage_root="import-mount-data",
+                relative_path=collection_root.relative_to(
+                    import_root
+                ).as_posix(),
+            )
+            first_source = collection.images[0].source
+            registration_path = resolve_managed_source_path(
+                first_source,
+                roots,
+            )
+            plate_label_paths = []
+            if options.plate_pixel_source == "label":
+                label_name = options.plate_label_name
+                for plate_image in collection.images:
+                    logical_path = _join_node_path(
+                        plate_image.image_node_path,
+                        "labels",
+                        label_name,
+                    )
+                    components = [
+                        component
+                        for component in plate_image.label_components
+                        if component.logical_node_path == logical_path
+                    ]
+                    if len(components) != 1:
+                        raise PixelIdentityError(
+                            f"Plate image {plate_image.image_node_path} does "
+                            f"not declare label {label_name!r} exactly once"
+                        )
+                    component = components[0]
+                    if component.source is None:
+                        physical_path = _node_directory(
+                            collection_root,
+                            logical_path,
+                        )
+                    else:
+                        physical_root = resolve_managed_source_path(
+                            component.source,
+                            roots,
+                        )
+                        physical_path = _node_directory(
+                            physical_root,
+                            component.source.node_path,
+                        )
+                    if not physical_path.is_dir():
+                        raise PixelIdentityError(
+                            f"Plate label is unavailable: {physical_path}"
+                        )
+                    plate_label_paths.append((
+                        plate_image.image_node_path,
+                        physical_path,
+                    ))
+            return ShallowRegistration(
+                collection_root=collection_root,
+                registration_path=registration_path,
+                reference=reference,
+                kind="plate",
+                plate_label_paths=tuple(plate_label_paths),
+                plate_label_name=options.plate_label_name,
+            )
+        if len(collection.images) != 1 or source_types != {"Image"}:
             raise PixelIdentityError(
-                "Primary registration currently requires one shallow image node"
+                "Primary registration requires one Image or one Plate source"
             )
         image = collection.images[0]
         kind = "primary"
@@ -295,9 +374,6 @@ def resolve_shallow_registration(
     if kind == "label":
         registration_path = path
     else:
-        roots = storage_roots or load_managed_storage_roots(
-            import_mount_path=import_root
-        )
         registration_path = resolve_managed_source_path(image.source, roots)
         if image.source.node_path != ".":
             registration_path = _node_directory(
