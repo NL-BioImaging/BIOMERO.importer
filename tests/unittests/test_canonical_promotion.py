@@ -169,3 +169,48 @@ def test_adopts_matching_commit_after_annotation_gap(tmp_path):
     assert adopted.path == first.path
     assert adopted.source == first.source
     assert retry_staging.is_dir()
+
+
+def test_indexes_existing_managed_zarr_without_moving_or_copying(tmp_path):
+    managed_root = tmp_path / "managed"
+    existing = managed_root / "workflow/results/image.zarr"
+    make_zarr(existing)
+
+    indexed = service(tmp_path).index_existing(
+        existing,
+        relative_path="workflow/results/image.zarr",
+        source_object_type="Image",
+        source_object_id=3207,
+        source_generation=1,
+        node_path=".",
+        original_identity=identity(),
+        existing_identity=identity(),
+        pixel_identity_origin="omero-pixels",
+    )
+
+    assert indexed.path == existing.resolve()
+    assert indexed.source.relative_path == "workflow/results/image.zarr"
+    assert indexed.source.pixel_identity == identity()
+    assert existing.is_dir()
+    assert not (existing / canonical_store.CANONICAL_MARKER_NAME).exists()
+
+
+def test_existing_index_rejects_pixel_mismatch(tmp_path):
+    managed_root = tmp_path / "managed"
+    existing = managed_root / "workflow/results/image.zarr"
+    make_zarr(existing)
+
+    with pytest.raises(CanonicalPixelMismatch, match="Existing pixels"):
+        service(tmp_path).index_existing(
+            existing,
+            relative_path="workflow/results/image.zarr",
+            source_object_type="Image",
+            source_object_id=3207,
+            source_generation=1,
+            node_path=".",
+            original_identity=identity(),
+            existing_identity=identity(instance="ISCC:IDIFFERENT"),
+            pixel_identity_origin="omero-pixels",
+        )
+
+    assert existing.is_dir()

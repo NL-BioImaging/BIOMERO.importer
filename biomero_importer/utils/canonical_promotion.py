@@ -114,6 +114,62 @@ class CanonicalPromotionService:
         path = self.store.commit(staging_path, source)
         return CanonicalPromotionResult(source=source, path=path)
 
+    def index_existing(
+        self,
+        existing_path: str | Path,
+        *,
+        relative_path: str | Path,
+        source_object_type: Literal["Image", "Plate"],
+        source_object_id: int,
+        source_generation: int,
+        node_path: str,
+        original_identity: PixelIdentity,
+        existing_identity: PixelIdentity,
+        pixel_identity_origin: Literal[
+            "raw", "omero-pixels", "canonical-bootstrap"
+        ],
+        interchange_profile: str = "ngff-0.4-zarr-v2",
+        store_identity: str | None = None,
+    ) -> CanonicalPromotionResult:
+        """Index a verified Zarr already inside managed storage in place."""
+        if (
+            original_identity.node_path != node_path
+            or existing_identity.node_path != node_path
+        ):
+            raise CanonicalPixelMismatch(
+                "Original and existing identity node paths must match the "
+                f"canonical node path {node_path!r}"
+            )
+        if not self.identities_match(original_identity, existing_identity):
+            raise CanonicalPixelMismatch(
+                f"Existing pixels do not match {source_object_type} "
+                f"{source_object_id} generation {source_generation}"
+            )
+
+        path = Path(existing_path).resolve()
+        managed_path = self.store.resolve(relative_path)
+        if path != managed_path:
+            raise ValueError(
+                "Existing Zarr path does not match its managed relative path"
+            )
+        if not path.is_dir():
+            raise ValueError(f"Existing Zarr is not a directory: {path}")
+
+        source = CanonicalZarrSource(
+            storage_root=self.storage_root_id,
+            relative_path=Path(relative_path).as_posix(),
+            node_path=node_path,
+            source_object_type=source_object_type,
+            source_object_id=source_object_id,
+            source_generation=source_generation,
+            interchange_profile=interchange_profile,
+            pixel_identity=original_identity,
+            pixel_identity_origin=pixel_identity_origin,
+            canonical_pixel_verified=True,
+            store_identity=store_identity,
+        )
+        return CanonicalPromotionResult(source=source, path=path)
+
 
 __all__ = [
     "CanonicalPixelMismatch",
