@@ -755,6 +755,73 @@ def test_materializes_plate_label_projection_as_standalone_image(tmp_path):
     assert result.labels[0].source.node_path == label_path
 
 
+def test_materializes_whole_shallow_plate_with_all_image_labels(tmp_path):
+    import_root = tmp_path / "data"
+    group_root = import_root / "Project A"
+    canonical = group_root / ".processed/Plate-1.ome.zarr"
+    returned = import_root / "results/plate.zarr"
+    destination = tmp_path / "transfer/plate.zarr"
+    destination.parent.mkdir()
+    _make_plate(canonical)
+    _make_plate(returned, {
+        "A/1/0": ("cells",),
+        "B/1/0": ("cells",),
+    })
+    identities = {
+        "A/1/0": _identity("ISCC:IA", "A/1/0"),
+        "B/1/0": _identity("ISCC:IB", "B/1/0"),
+        "A/1/0/labels/cells": _identity(
+            "ISCC:IACELLS", "A/1/0/labels/cells", "label"
+        ),
+        "B/1/0/labels/cells": _identity(
+            "ISCC:IBCELLS", "B/1/0/labels/cells", "label"
+        ),
+    }
+    decision = evaluate_returned_zarr(
+        returned,
+        _manifest(_plate_input()),
+        identity_provider=NodeIdentityProvider(identities),
+    )
+    normalize_returned_zarr(
+        decision,
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    roots = {
+        "import-mount-data": import_root,
+        "group-0-data": group_root,
+    }
+    registration = resolve_shallow_registration(
+        returned,
+        storage_roots=roots,
+        import_mount_path=import_root,
+    )
+
+    result = materialize_shallow_zarr(
+        registration.reference,
+        destination,
+        roots,
+    )
+
+    assert json.loads((destination / ".zattrs").read_text(encoding="utf-8")) == {
+        "plate": {"wells": [{"path": "A/1"}, {"path": "B/1"}]},
+    }
+    for image_path in ("A/1/0", "B/1/0"):
+        assert (
+            destination / image_path / "0/0.0.0.0"
+        ).read_bytes() == b"image-pixels" * 2048
+        assert (
+            destination / image_path / "labels/cells/0/0.0.0.0"
+        ).read_bytes() == b"image-pixels" * 2048
+        assert json.loads((
+            destination / image_path / "labels/.zattrs"
+        ).read_text(encoding="utf-8")) == {"labels": ["cells"]}
+    assert {label.logical_node_path for label in result.labels} == {
+        "A/1/0/labels/cells",
+        "B/1/0/labels/cells",
+    }
+    assert all(label.source is not None for label in result.labels)
+
+
 def test_materializes_legacy_shallow_manifest_without_component_records(
     tmp_path,
 ):

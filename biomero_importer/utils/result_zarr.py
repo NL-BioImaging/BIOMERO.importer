@@ -393,19 +393,28 @@ def resolve_shallow_registration(
 
 
 def materialize_shallow_zarr(
-    reference: ShallowZarrReference,
+    reference: ShallowZarrReference | ShallowPlateReference,
     destination: str | Path,
     storage_roots: dict[str, Path],
     *,
     identity_provider: IsccBioIdentityProvider | None = None,
     replace=os.replace,
 ) -> MaterializedShallowResult:
-    """Build a conventional image-plus-label Zarr from a shallow reference.
+    """Build a conventional image or Plate Zarr from a shallow reference.
 
     The managed source and collections are read-only. The destination is
     assembled as a sibling staging directory and atomically renamed only after
     every declared label has been copied and its stable source recorded.
     """
+    if isinstance(reference, ShallowPlateReference):
+        return _materialize_shallow_plate_zarr(
+            reference,
+            destination,
+            storage_roots,
+            identity_provider=identity_provider,
+            replace=replace,
+        )
+
     destination = Path(destination)
     if destination.exists():
         raise PixelIdentityError(
@@ -541,6 +550,170 @@ def materialize_shallow_zarr(
         if discovered_paths != expected_paths:
             raise PixelIdentityError(
                 "Materialized label inventory differs from shallow collection"
+            )
+        replace(staging, destination)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+
+    return MaterializedShallowResult(
+        destination=destination,
+        collection=collection,
+        labels=tuple(managed_labels),
+    )
+
+
+def _materialize_shallow_plate_zarr(
+    reference: ShallowPlateReference,
+    destination: str | Path,
+    storage_roots: dict[str, Path],
+    *,
+    identity_provider: IsccBioIdentityProvider | None = None,
+    replace=os.replace,
+) -> MaterializedShallowResult:
+    """Reconstruct one conventional Plate from its canonical pixels and labels."""
+    destination = Path(destination)
+    if destination.exists():
+        raise PixelIdentityError(
+            f"Shallow materialization destination already exists: {destination}"
+        )
+    collection_root = resolve_managed_source_path(reference, storage_roots)
+    manifest_path = collection_root / SHALLOW_COLLECTION_MANIFEST
+    try:
+        collection = ShallowCollection.from_dict(json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        ))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise PixelIdentityError(
+            f"Invalid shallow collection manifest: {manifest_path}"
+        ) from exc
+    try:
+        expected_reference = ShallowPlateReference.from_collection(
+            collection,
+            storage_root=reference.storage_root,
+            relative_path=reference.relative_path,
+        )
+    except ValueError as exc:
+        raise PixelIdentityError(
+            "Shallow Plate collection has inconsistent canonical sources"
+        ) from exc
+    if expected_reference != reference:
+        raise PixelIdentityError(
+            "Shallow Plate reference no longer matches its collection manifest"
+        )
+
+    first_source = collection.images[0].source
+    canonical_root = resolve_managed_source_path(first_source, storage_roots)
+    canonical_image_directories = {
+        _node_directory(canonical_root, image.source.node_path)
+        for image in collection.images
+    }
+    for directory in canonical_image_directories:
+        if not directory.is_dir():
+            raise PixelIdentityError(
+                f"Shallow Plate source image node is unavailable: {directory}"
+            )
+
+    token = uuid4().hex
+    staging = destination.with_name(
+        f".{destination.name}.biomero-materialize-{token}"
+    )
+    provider = identity_provider or IsccBioIdentityProvider()
+
+    def ignore(directory, names):
+        current = Path(directory)
+        ignored = {".biomero-canonical.json"}.intersection(names)
+        if current in canonical_image_directories and "labels" in names:
+            ignored.add("labels")
+        return ignored
+
+    managed_labels = []
+    expected_label_paths = set()
+    try:
+        shutil.copytree(canonical_root, staging, symlinks=True, ignore=ignore)
+        for image in collection.images:
+            components = image.label_components
+            if not components:
+                legacy_components = []
+                for logical_path in image.label_node_paths:
+                    physical_path = _node_directory(collection_root, logical_path)
+                    if not physical_path.is_dir():
+                        raise PixelIdentityError(
+                            f"Legacy shallow Plate lost label {logical_path}"
+                        )
+                    node = NgffNode(
+                        node_path=logical_path,
+                        role="label",
+                        parent_image_node_path=image.image_node_path,
+                    )
+                    legacy_components.append(ZarrLabelComponent(
+                        logical_node_path=logical_path,
+                        pixel_identity=_identity_for_node(
+                            collection_root, node, provider
+                        ),
+                    ))
+                components = tuple(legacy_components)
+
+            labels_root = _node_directory(
+                staging,
+                _join_node_path(image.image_node_path, "labels"),
+            )
+            labels_root.mkdir()
+            _write_json(labels_root / ".zgroup", {"zarr_format": 2})
+            label_names = []
+            prefix = PurePosixPath(
+                _join_node_path(image.image_node_path, "labels")
+            )
+            for component in sorted(
+                components, key=lambda item: item.logical_node_path
+            ):
+                logical = PurePosixPath(component.logical_node_path)
+                try:
+                    relative = logical.relative_to(prefix)
+                except ValueError as exc:
+                    raise PixelIdentityError(
+                        "Plate label paths must be nested below their image labels/"
+                    ) from exc
+                if len(relative.parts) != 1:
+                    raise PixelIdentityError(
+                        "Plate labels must have one name below the image labels/ group"
+                    )
+                label_names.append(relative.name)
+                expected_label_paths.add(component.logical_node_path)
+                if component.source is None:
+                    physical_root = collection_root
+                    physical_node = component.logical_node_path
+                    managed_source = ManagedZarrNode(
+                        storage_root=reference.storage_root,
+                        relative_path=reference.relative_path,
+                        node_path=component.logical_node_path,
+                    )
+                else:
+                    physical_root = resolve_managed_source_path(
+                        component.source,
+                        storage_roots,
+                    )
+                    physical_node = component.source.node_path
+                    managed_source = component.source
+                physical_path = _node_directory(physical_root, physical_node)
+                if not physical_path.is_dir():
+                    raise PixelIdentityError(
+                        f"Managed shallow Plate label is unavailable: {physical_path}"
+                    )
+                target = _node_directory(staging, component.logical_node_path)
+                shutil.copytree(physical_path, target, symlinks=True)
+                managed_labels.append(component.model_copy(update={
+                    "source": managed_source,
+                }))
+            _write_json(labels_root / ".zattrs", {"labels": label_names})
+
+        discovered_label_paths = {
+            node.node_path for node in discover_ngff_nodes(staging)
+            if node.role == "label"
+        }
+        if discovered_label_paths != expected_label_paths:
+            raise PixelIdentityError(
+                "Materialized Plate label inventory differs from shallow collection"
             )
         replace(staging, destination)
     finally:
