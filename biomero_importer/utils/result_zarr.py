@@ -700,6 +700,15 @@ def normalize_returned_zarr(
         root,
         image_node.node_path,
     ))
+    inherited_label_paths = {
+        component.logical_node_path
+        for component in decision.label_components
+        if component.source is not None
+    }
+    omitted.update(
+        _node_directory(root, label_path)
+        for label_path in inherited_label_paths
+    )
     token = uuid4().hex
     staging = root.with_name(f".{root.name}.biomero-stage-{token}")
     backup = root.with_name(f".{root.name}.biomero-full-{token}")
@@ -742,7 +751,13 @@ def normalize_returned_zarr(
             raise PixelIdentityError("Shallow collection manifest changed")
         for label in label_nodes:
             label_dir = _node_directory(staging, label.node_path)
-            if not label_dir.is_dir():
+            if label.node_path in inherited_label_paths:
+                if label_dir.exists():
+                    raise PixelIdentityError(
+                        f"Staged shallow result retained inherited label "
+                        f"{label.node_path}"
+                    )
+            elif not label_dir.is_dir():
                 raise PixelIdentityError(
                     f"Staged shallow result lost label node {label.node_path}"
                 )

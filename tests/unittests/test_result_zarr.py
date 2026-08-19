@@ -510,9 +510,8 @@ def test_materializes_original_with_inherited_and_local_labels(tmp_path):
         (destination / "labels/.zattrs").read_text(encoding="utf-8")
     ) == {"labels": ["nuclei", "cells"]}
     assert all(label.source is not None for label in result.labels)
-    assert (
-        returned / "labels/nuclei/0/0.0.0.0"
-    ).read_bytes() == b"workflow-copy-of-nuclei"
+    assert not (returned / "labels/nuclei").exists()
+    assert (returned / "labels/cells/0/0.0.0.0").read_bytes() == b"new-cells"
 
 
 def test_materializes_legacy_shallow_manifest_without_component_records(
