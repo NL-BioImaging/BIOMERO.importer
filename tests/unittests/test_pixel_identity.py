@@ -206,7 +206,7 @@ def test_default_provider_hashes_standard_numeric_pyramid(tmp_path):
     )
 
 
-def test_targets_an_explicit_nested_zarr_node(tmp_path):
+def test_targets_an_explicit_nested_zarr_node(tmp_path, monkeypatch):
     root = tmp_path / "plate.ome.zarr"
     node = root / "A" / "1" / "0"
     node.mkdir(parents=True)
@@ -217,6 +217,12 @@ def test_targets_an_explicit_nested_zarr_node(tmp_path):
         ),
         tool_version="0.1.0",
     )
+    aliases = []
+
+    def make_alias(source, alias, *, target_is_directory):
+        aliases.append((source, alias, target_is_directory))
+
+    monkeypatch.setattr(pixel_identity.os, "symlink", make_alias)
 
     identity = provider.generate(
         root,
@@ -227,7 +233,12 @@ def test_targets_an_explicit_nested_zarr_node(tmp_path):
         axes=("t", "c", "z", "y", "x"),
     )
 
-    assert calls == [(node, "bioio")]
+    assert len(calls) == 1
+    assert calls[0][0].name == "image.ome.zarr"
+    assert calls[0][1] == "bioio"
+    assert aliases[0][0] == node
+    assert aliases[0][1] == calls[0][0]
+    assert aliases[0][2] is True
     assert identity.node_path == "A/1/0"
 
 

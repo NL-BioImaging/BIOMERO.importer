@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 import json
+import os
 from pathlib import Path, PurePosixPath
+import tempfile
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 from biomero_schema.zarr import PixelIdentity
@@ -196,7 +198,27 @@ class IsccBioIdentityProvider:
         # pyramid arrays of a normal multiscale image for bioformats2raw
         # series. BioIO follows the same upstream IMAGEWALK contract without
         # duplicating hashing or traversal here.
-        results = list(generate(target, source_type="bioio"))
+        if target.name.lower().endswith(".zarr"):
+            results = list(generate(target, source_type="bioio"))
+        else:
+            # BioIO selects its reader from the path suffix. NGFF Plate image
+            # nodes and ordinary label nodes are valid standalone image groups
+            # but normally have names such as A/1/0 or labels/cells. Present a
+            # temporary, zero-copy *.ome.zarr alias so upstream ISCC-BIO can
+            # apply the same BioIO IMAGEWALK implementation used for root
+            # images. The managed store remains read-only.
+            with tempfile.TemporaryDirectory(
+                prefix="biomero-iscc-node-"
+            ) as temporary:
+                alias = Path(temporary) / "image.ome.zarr"
+                try:
+                    os.symlink(target, alias, target_is_directory=True)
+                except OSError as exc:
+                    raise PixelIdentityError(
+                        "Cannot create the temporary NGFF node alias required "
+                        "for ISCC-BIO"
+                    ) from exc
+                results = list(generate(alias, source_type="bioio"))
         return self._build_identity(
             results,
             source_description="An explicit Zarr node",
