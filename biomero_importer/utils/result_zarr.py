@@ -361,12 +361,12 @@ def materialize_shallow_zarr(
         raise PixelIdentityError(
             "Shallow reference no longer matches its collection manifest"
         )
-    if image.image_node_path != "." or image.source.node_path != ".":
-        raise PixelIdentityError(
-            "Materialization currently supports one root-level NGFF image"
-        )
-
     canonical_root = resolve_managed_source_path(image.source, storage_roots)
+    canonical_image = _node_directory(canonical_root, image.source.node_path)
+    if not canonical_image.is_dir():
+        raise PixelIdentityError(
+            f"Shallow source image node is unavailable: {canonical_image}"
+        )
     provider = identity_provider or IsccBioIdentityProvider()
     components = image.label_components
     if not components:
@@ -392,30 +392,32 @@ def materialize_shallow_zarr(
     staging = destination.with_name(
         f".{destination.name}.biomero-materialize-{token}"
     )
-    source_labels = canonical_root / "labels"
+    source_labels = canonical_image / "labels"
 
     def ignore(directory, names):
         current = Path(directory)
         ignored = {".biomero-canonical.json"}.intersection(names)
-        if current == canonical_root and source_labels.name in names:
+        if current == canonical_image and source_labels.name in names:
             ignored.add(source_labels.name)
         return ignored
 
     managed_labels = []
     try:
-        shutil.copytree(canonical_root, staging, symlinks=True, ignore=ignore)
+        shutil.copytree(canonical_image, staging, symlinks=True, ignore=ignore)
         labels_root = staging / "labels"
         labels_root.mkdir(parents=True, exist_ok=False)
         _write_json(labels_root / ".zgroup", {"zarr_format": 2})
         label_names = []
         for component in components:
-            prefix = PurePosixPath("labels")
+            prefix = PurePosixPath(
+                _join_node_path(image.image_node_path, "labels")
+            )
             logical = PurePosixPath(component.logical_node_path)
             try:
                 label_name = logical.relative_to(prefix).as_posix()
             except ValueError as exc:
                 raise PixelIdentityError(
-                    "Root-image label paths must be nested below labels/"
+                    "Label paths must be nested below their image labels/"
                 ) from exc
             label_names.append(label_name)
             if component.source is None:
@@ -438,17 +440,29 @@ def materialize_shallow_zarr(
                 raise PixelIdentityError(
                     f"Managed shallow label is unavailable: {physical_path}"
                 )
-            target = _node_directory(staging, component.logical_node_path)
+            target_node = _join_node_path("labels", label_name)
+            target = _node_directory(staging, target_node)
             shutil.copytree(physical_path, target, symlinks=True)
-            managed_labels.append(component.model_copy(update={
-                "source": managed_source,
-            }))
+            managed_labels.append(ZarrLabelComponent(
+                logical_node_path=target_node,
+                pixel_identity=component.pixel_identity.model_copy(update={
+                    "node_path": target_node,
+                }),
+                source=managed_source,
+            ))
         _write_json(labels_root / ".zattrs", {"labels": label_names})
         discovered_paths = {
             node.node_path for node in discover_ngff_nodes(staging)
             if node.role == "label"
         }
-        if discovered_paths != set(image.label_node_paths):
+        expected_paths = {
+            _join_node_path(
+                "labels",
+                PurePosixPath(path).relative_to(prefix).as_posix(),
+            )
+            for path in image.label_node_paths
+        }
+        if discovered_paths != expected_paths:
             raise PixelIdentityError(
                 "Materialized label inventory differs from shallow collection"
             )
@@ -657,49 +671,91 @@ def normalize_returned_zarr(
     """
     if not decision.eligible or len(decision.matched_inputs) != 1:
         raise PixelIdentityError("Returned Zarr is not eligible for shallowing")
-    if len(decision.image_identities) != 1:
-        raise PixelIdentityError("Expected exactly one returned image identity")
-
     root = decision.store_path
     if not root.is_dir():
         raise PixelIdentityError(f"Returned Zarr does not exist: {root}")
     nodes = discover_ngff_nodes(root)
     image_nodes = tuple(node for node in nodes if node.role == "image")
     label_nodes = tuple(node for node in nodes if node.role == "label")
-    if len(image_nodes) != 1 or not label_nodes:
+    if not image_nodes or not label_nodes:
         raise PixelIdentityError(
-            "Only one-image returned stores with declared labels can be "
-            "normalized in this implementation"
+            "Returned stores require image nodes and declared labels"
         )
-
-    image_node = image_nodes[0]
-    returned_identity = decision.image_identities[0]
-    if returned_identity.node_path != image_node.node_path:
+    returned_by_path = {
+        identity.node_path: identity
+        for identity in decision.image_identities
+    }
+    if set(returned_by_path) != {node.node_path for node in image_nodes}:
         raise PixelIdentityError(
-            "Returned identity no longer describes the discovered image node"
+            "Returned identities no longer describe the discovered image nodes"
         )
     matched_input = decision.matched_inputs[0]
-    if matched_input.transfer_artifact != root.name:
+    if (
+        matched_input.transfer_artifact is not None
+        and matched_input.transfer_artifact != root.name
+    ):
         raise PixelIdentityError(
             "Returned store name no longer matches its transferred artifact"
         )
 
+    if matched_input.plate_source is not None:
+        input_sources = {
+            image.image_node_path: image.source
+            for image in matched_input.plate_source.images
+        }
+        interchange_profile = matched_input.plate_source.interchange_profile
+    elif matched_input.source is not None:
+        input_sources = {matched_input.source.node_path: matched_input.source}
+        interchange_profile = matched_input.source.interchange_profile
+    else:
+        raise PixelIdentityError("Matched input has no canonical source")
+    if set(input_sources) != set(returned_by_path):
+        raise PixelIdentityError(
+            "Matched input no longer describes every returned image node"
+        )
+
+    components_by_image = {node.node_path: [] for node in image_nodes}
+    for component in decision.label_components:
+        matches = [
+            node.node_path for node in image_nodes
+            if PurePosixPath(component.logical_node_path).is_relative_to(
+                PurePosixPath(_join_node_path(node.node_path, "labels"))
+            )
+        ]
+        if len(matches) != 1:
+            raise PixelIdentityError(
+                f"Label has no unique parent image: {component.logical_node_path}"
+            )
+        components_by_image[matches[0]].append(component)
+
     collection = ShallowCollection(
         workflow_id=UUID(str(workflow_id)),
         transfer_artifact=root.name,
-        interchange_profile=matched_input.source.interchange_profile,
-        images=(ShallowImageReference(
-            image_node_path=image_node.node_path,
-            source=matched_input.source,
-            returned_pixel_identity=returned_identity,
-            label_node_paths=tuple(node.node_path for node in label_nodes),
-            label_components=decision.label_components,
-        ),),
+        interchange_profile=interchange_profile,
+        images=tuple(
+            ShallowImageReference(
+                image_node_path=image_node.node_path,
+                source=input_sources[image_node.node_path],
+                returned_pixel_identity=returned_by_path[image_node.node_path],
+                label_node_paths=tuple(
+                    component.logical_node_path
+                    for component in components_by_image[image_node.node_path]
+                ),
+                label_components=tuple(
+                    components_by_image[image_node.node_path]
+                ),
+            )
+            for image_node in image_nodes
+        ),
     )
-    omitted = set(_declared_image_dataset_directories(
-        root,
-        image_node.node_path,
-    ))
+    omitted = {
+        directory
+        for image_node in image_nodes
+        for directory in _declared_image_dataset_directories(
+            root,
+            image_node.node_path,
+        )
+    }
     inherited_label_paths = {
         component.logical_node_path
         for component in decision.label_components
@@ -725,18 +781,19 @@ def normalize_returned_zarr(
     committed = False
     try:
         shutil.copytree(root, staging, symlinks=True, ignore=ignore)
-        staging_attrs_path = _node_directory(
-            staging,
-            image_node.node_path,
-        ) / ".zattrs"
-        staging_attrs = _read_attrs(staging_attrs_path.parent)
-        staging_attrs.pop("multiscales", None)
-        staging_attrs["biomero"] = {
-            "model": collection.model,
-            "manifest": SHALLOW_COLLECTION_MANIFEST,
-            "workflowId": str(collection.workflow_id),
-        }
-        _write_json(staging_attrs_path, staging_attrs)
+        for image_node in image_nodes:
+            staging_attrs_path = _node_directory(
+                staging,
+                image_node.node_path,
+            ) / ".zattrs"
+            staging_attrs = _read_attrs(staging_attrs_path.parent)
+            staging_attrs.pop("multiscales", None)
+            staging_attrs["biomero"] = {
+                "model": collection.model,
+                "manifest": SHALLOW_COLLECTION_MANIFEST,
+                "workflowId": str(collection.workflow_id),
+            }
+            _write_json(staging_attrs_path, staging_attrs)
         _write_json(
             staging / SHALLOW_COLLECTION_MANIFEST,
             collection.to_dict(),
@@ -824,22 +881,54 @@ def evaluate_returned_zarr(
 
     image_nodes = tuple(node for node in nodes if node.role == "image")
     label_paths = tuple(node.node_path for node in nodes if node.role == "label")
-    if len(image_nodes) != 1:
+    if not image_nodes:
         return ReturnedZarrDecision(
             store_path=root,
             outcome="keep-full",
-            reason="unsupported-multi-image-result",
+            reason="no-image-nodes",
             label_node_paths=label_paths,
         )
     provider = identity_provider or IsccBioIdentityProvider()
     try:
-        returned_identity = _identity_for_node(root, image_nodes[0], provider)
+        returned_identities = tuple(
+            _identity_for_node(root, node, provider)
+            for node in image_nodes
+        )
     except PixelIdentityError as exc:
         return ReturnedZarrDecision(
             store_path=root,
             outcome="keep-full",
             reason=f"identity-unavailable: {exc}",
             label_node_paths=label_paths,
+        )
+
+    def sources_for(item: CanonicalInput):
+        if item.plate_source is not None:
+            return {
+                image.image_node_path: image.source
+                for image in item.plate_source.images
+            }
+        if item.source is not None:
+            return {item.source.node_path: item.source}
+        return {}
+
+    returned_by_path = {
+        identity.node_path: identity for identity in returned_identities
+    }
+    unchanged_reason = (
+        "input-image-unchanged"
+        if len(returned_identities) == 1
+        else "input-plate-unchanged"
+    )
+
+    def input_matches(item: CanonicalInput) -> bool:
+        sources = sources_for(item)
+        return set(sources) == set(returned_by_path) and all(
+            pixel_identities_match(
+                returned_by_path[node_path],
+                source.pixel_identity,
+            )
+            for node_path, source in sources.items()
         )
 
     artifact_matches = tuple(
@@ -852,36 +941,30 @@ def evaluate_returned_zarr(
     elif len(artifact_matches) == 1:
         matches = artifact_matches
         reason = (
-            "input-image-unchanged"
-            if pixel_identities_match(
-                returned_identity,
-                matches[0].source.pixel_identity,
-            )
+            unchanged_reason
+            if input_matches(matches[0])
             else "pixels-changed"
         )
     else:
         matches = tuple(
             item for item in canonical_inputs.inputs
-            if pixel_identities_match(
-                returned_identity,
-                item.source.pixel_identity,
-            )
+            if input_matches(item)
         )
         if len(matches) == 1:
-            reason = "input-image-unchanged"
+            reason = unchanged_reason
         elif len(matches) > 1:
             reason = "ambiguous-input-identity"
             matches = ()
         else:
             reason = "no-input-identity-match"
 
-    unchanged = reason == "input-image-unchanged"
+    unchanged = reason == unchanged_reason
     if unchanged and not label_paths:
         return ReturnedZarrDecision(
             store_path=root,
             outcome="skip-passthrough",
-            reason="input-image-unchanged-no-labels",
-            image_identities=(returned_identity,),
+            reason=f"{unchanged_reason}-no-labels",
+            image_identities=returned_identities,
             matched_inputs=matches,
         )
     if not unchanged or not label_paths:
@@ -889,7 +972,7 @@ def evaluate_returned_zarr(
             store_path=root,
             outcome="keep-full",
             reason=reason,
-            image_identities=(returned_identity,),
+            image_identities=returned_identities,
             label_node_paths=label_paths,
         )
 
@@ -904,14 +987,21 @@ def evaluate_returned_zarr(
             store_path=root,
             outcome="keep-full",
             reason=f"label-identity-unavailable: {exc}",
-            image_identities=(returned_identity,),
+            image_identities=returned_identities,
             label_node_paths=label_paths,
         )
 
-    input_labels = {
-        label.logical_node_path: label
-        for label in matches[0].labels
-    }
+    if matches[0].plate_source is not None:
+        input_labels = {
+            label.logical_node_path: label
+            for image in matches[0].plate_source.images
+            for label in image.labels
+        }
+    else:
+        input_labels = {
+            label.logical_node_path: label
+            for label in matches[0].labels
+        }
     label_components = []
     for identity in label_identities:
         inherited = input_labels.get(identity.node_path)
@@ -931,7 +1021,7 @@ def evaluate_returned_zarr(
         store_path=root,
         outcome="eligible",
         reason=reason,
-        image_identities=(returned_identity,),
+        image_identities=returned_identities,
         label_identities=label_identities,
         label_components=tuple(label_components),
         label_node_paths=label_paths,

@@ -5,6 +5,8 @@ from uuid import UUID
 from biomero_schema.zarr import (
     CanonicalInput,
     CanonicalInputManifest,
+    CanonicalPlateImage,
+    CanonicalPlateSource,
     CanonicalZarrSource,
     ManagedZarrNode,
     PixelIdentity,
@@ -53,6 +55,21 @@ def _make_image(root: Path, node_path=".", labels=()) -> None:
         _write_json(node / "labels" / ".zattrs", {"labels": list(labels)})
         for label in labels:
             _make_image(root, f"{node_path}/labels/{label}".replace("./", ""))
+
+
+def _make_plate(root: Path, labels_by_image=None) -> None:
+    labels_by_image = labels_by_image or {}
+    _write_json(root / ".zgroup", {"zarr_format": 2})
+    _write_json(root / ".zattrs", {
+        "plate": {"wells": [{"path": "A/1"}, {"path": "B/1"}]},
+    })
+    for well in ("A/1", "B/1"):
+        _write_json(
+            root / well / ".zattrs",
+            {"well": {"images": [{"path": "0"}]}},
+        )
+        image_path = f"{well}/0"
+        _make_image(root, image_path, labels_by_image.get(image_path, ()))
 
 
 def _identity(
@@ -110,6 +127,47 @@ def _input(
     )
 
 
+def _plate_input(artifact="plate.zarr", labels_by_image=None) -> CanonicalInput:
+    labels_by_image = labels_by_image or {}
+    relative_path = ".processed/Plate-1.ome.zarr"
+    images = []
+    for image_path, instance in (
+        ("A/1/0", "ISCC:IA"),
+        ("B/1/0", "ISCC:IB"),
+    ):
+        source = CanonicalZarrSource(
+            storage_root="group-0-data",
+            relative_path=relative_path,
+            node_path=image_path,
+            source_object_type="Plate",
+            source_object_id=1,
+            source_generation=1,
+            interchange_profile="ngff-0.4-zarr-v2",
+            pixel_identity=_identity(instance, image_path),
+            pixel_identity_origin="canonical-bootstrap",
+            canonical_pixel_verified=True,
+        )
+        images.append(CanonicalPlateImage(
+            image_node_path=image_path,
+            source=source,
+            labels=tuple(labels_by_image.get(image_path, ())),
+        ))
+    return CanonicalInput(
+        ordinal=0,
+        selected_object_type="Plate",
+        selected_object_id=1,
+        transfer_artifact=artifact,
+        plate_source=CanonicalPlateSource(
+            storage_root="group-0-data",
+            relative_path=relative_path,
+            source_object_id=1,
+            source_generation=1,
+            interchange_profile="ngff-0.4-zarr-v2",
+            images=tuple(images),
+        ),
+    )
+
+
 class IdentityProvider:
     def __init__(self, identity):
         self.identity = identity
@@ -158,6 +216,77 @@ def test_discovers_plate_image_level_labels(tmp_path):
         ("A/1/0", "image"),
         ("A/1/0/labels/cells", "label"),
     ]
+
+
+def test_unchanged_plate_without_labels_is_a_passthrough(tmp_path):
+    root = tmp_path / "plate.zarr"
+    _make_plate(root)
+    provider = NodeIdentityProvider({
+        "A/1/0": _identity("ISCC:IA", "A/1/0"),
+        "B/1/0": _identity("ISCC:IB", "B/1/0"),
+    })
+
+    decision = evaluate_returned_zarr(
+        root,
+        _manifest(_plate_input()),
+        identity_provider=provider,
+    )
+
+    assert decision.unchanged_passthrough
+    assert decision.reason == "input-plate-unchanged-no-labels"
+    assert len(decision.image_identities) == 2
+
+
+def test_changed_plate_image_keeps_full_result(tmp_path):
+    root = tmp_path / "plate.zarr"
+    _make_plate(root, {"A/1/0": ("cells",)})
+    provider = NodeIdentityProvider({
+        "A/1/0": _identity("ISCC:IA", "A/1/0"),
+        "B/1/0": _identity("ISCC:ICHANGED", "B/1/0"),
+    })
+
+    decision = evaluate_returned_zarr(
+        root,
+        _manifest(_plate_input()),
+        identity_provider=provider,
+    )
+
+    assert decision.outcome == "keep-full"
+    assert decision.reason == "pixels-changed"
+
+
+def test_normalizes_plate_images_and_retains_image_level_label(tmp_path):
+    root = tmp_path / "plate.zarr"
+    _make_plate(root, {"A/1/0": ("cells",)})
+    label_path = "A/1/0/labels/cells"
+    provider = NodeIdentityProvider({
+        "A/1/0": _identity("ISCC:IA", "A/1/0"),
+        "B/1/0": _identity("ISCC:IB", "B/1/0"),
+        label_path: _identity("ISCC:ICELLS", label_path, "label"),
+    })
+    decision = evaluate_returned_zarr(
+        root,
+        _manifest(_plate_input()),
+        identity_provider=provider,
+    )
+
+    normalized = normalize_returned_zarr(
+        decision,
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+
+    assert decision.eligible
+    assert decision.reason == "input-plate-unchanged"
+    assert not (root / "A/1/0/0").exists()
+    assert not (root / "B/1/0/0").exists()
+    assert (root / label_path).is_dir()
+    assert len(normalized.collection.images) == 2
+    images = {
+        image.image_node_path: image
+        for image in normalized.collection.images
+    }
+    assert images["A/1/0"].label_node_paths == (label_path,)
+    assert images["B/1/0"].label_node_paths == ()
 
 
 def test_transfer_artifact_disambiguates_duplicate_input_identities(tmp_path):
@@ -512,6 +641,55 @@ def test_materializes_original_with_inherited_and_local_labels(tmp_path):
     assert all(label.source is not None for label in result.labels)
     assert not (returned / "labels/nuclei").exists()
     assert (returned / "labels/cells/0/0.0.0.0").read_bytes() == b"new-cells"
+
+
+def test_materializes_plate_label_projection_as_standalone_image(tmp_path):
+    import_root = tmp_path / "data"
+    group_root = import_root / "Project A"
+    canonical = group_root / ".processed/Plate-1.ome.zarr"
+    returned = import_root / "results/plate.zarr"
+    _make_plate(canonical)
+    _make_plate(returned, {"A/1/0": ("cells",)})
+    label_path = "A/1/0/labels/cells"
+    provider = NodeIdentityProvider({
+        "A/1/0": _identity("ISCC:IA", "A/1/0"),
+        "B/1/0": _identity("ISCC:IB", "B/1/0"),
+        label_path: _identity("ISCC:ICELLS", label_path, "label"),
+    })
+    decision = evaluate_returned_zarr(
+        returned,
+        _manifest(_plate_input()),
+        identity_provider=provider,
+    )
+    normalize_returned_zarr(
+        decision,
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    roots = {
+        "import-mount-data": import_root,
+        "group-0-data": group_root,
+    }
+    registration = resolve_shallow_registration(
+        returned / label_path,
+        storage_roots=roots,
+        import_mount_path=import_root,
+    )
+    destination = tmp_path / "transfer/image.zarr"
+    destination.parent.mkdir()
+
+    result = materialize_shallow_zarr(
+        registration.reference,
+        destination,
+        roots,
+    )
+
+    assert (destination / "0/0.0.0.0").read_bytes() == b"image-pixels" * 2048
+    assert (
+        destination / "labels/cells/0/0.0.0.0"
+    ).read_bytes() == b"image-pixels" * 2048
+    assert discover_ngff_nodes(destination)[0].node_path == "."
+    assert result.labels[0].logical_node_path == "labels/cells"
+    assert result.labels[0].source.node_path == label_path
 
 
 def test_materializes_legacy_shallow_manifest_without_component_records(
