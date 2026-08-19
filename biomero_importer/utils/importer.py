@@ -30,6 +30,9 @@ PODMAN_RUN_MAX_ATTEMPTS = 3  # Bounded retries for transient bind setup failures
 PODMAN_RUN_RETRY_DELAY = 2  # Initial retry delay, doubled after each failure
 TMP_OUTPUT_FOLDER = "OMERO_inplace"
 PROCESSED_DATA_FOLDER = ".processed"
+SHALLOW_ZARR_ENABLED = (
+    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+)
 
 # A CIFS/DFS referral reconnect can make Podman's first bind-source statfs fail
 # even though the same mount succeeds immediately afterward. Keep this exact so
@@ -603,7 +606,22 @@ class DataPackageImporter:
         import zarr
         from types import SimpleNamespace
 
-        file_title = os.path.splitext(os.path.basename(uri))[0].rstrip('.ome')
+        logical_uri = str(uri)
+        file_title = os.path.splitext(os.path.basename(logical_uri))[0].rstrip('.ome')
+        shallow_registration = None
+        if SHALLOW_ZARR_ENABLED:
+            from .result_zarr import resolve_shallow_registration
+
+            shallow_registration = resolve_shallow_registration(logical_uri)
+            if shallow_registration is not None:
+                uri = str(shallow_registration.registration_path)
+                self.logger.info(
+                    "Resolved %s shallow Zarr registration %s to pixel backing %s",
+                    shallow_registration.kind,
+                    logical_uri,
+                    uri,
+                )
+
         args = SimpleNamespace(uri=uri, endpoint=endpoint, name=file_title,
                                nosignrequest=nosignrequest, target=str(target), target_by_name=target_by_name)
 
@@ -679,16 +697,39 @@ class DataPackageImporter:
             for obj in objs:
                 link_to_target(args, conn, obj)
 
+        if shallow_registration is not None:
+            from biomero_schema.zarr import SHALLOW_COLLECTION_NAMESPACE
+
+            object_type = "Plate" if "plate" in zattrs else "Image"
+            for obj in objs:
+                object_id = obj.getId().getValue()
+                ezomero.post_map_annotation(
+                    conn=conn,
+                    object_type=object_type,
+                    object_id=object_id,
+                    kv_dict=(
+                        shallow_registration.reference.to_annotation_values()
+                    ),
+                    ns=SHALLOW_COLLECTION_NAMESPACE,
+                    across_groups=False,
+                )
+                self.logger.info(
+                    "Attached shallow collection reference to %s %s: %s",
+                    object_type,
+                    object_id,
+                    shallow_registration.collection_root,
+                )
+
         # --- end copy from register.main() ---
 
         image_ids = [obj.getId().getValue() for obj in objs]
         is_plate = "plate" in zattrs
         if image_ids:
             self.imported = True
-            self.logger.info(f'Import successfully for {uri}')
+            self.logger.info(f'Import successfully for {logical_uri}')
         else:
             self.imported = False
-            self.logger.error(f'Import failed for {uri}')
+            self.logger.error(f'Import failed for {logical_uri}')
         return image_ids, is_plate
 
     @connection

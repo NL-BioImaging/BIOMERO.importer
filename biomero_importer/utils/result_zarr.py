@@ -21,6 +21,7 @@ from biomero_schema.zarr import (
     SHALLOW_COLLECTION_MANIFEST,
     ShallowCollection,
     ShallowImageReference,
+    ShallowZarrReference,
 )
 
 from .pixel_identity import (
@@ -45,7 +46,7 @@ class ReturnedZarrDecision:
     """Keep-only result of comparing one returned store with workflow inputs."""
 
     store_path: Path
-    outcome: Literal["eligible", "keep-full"]
+    outcome: Literal["eligible", "keep-full", "skip-passthrough"]
     reason: str
     image_identities: tuple[PixelIdentity, ...] = ()
     label_node_paths: tuple[str, ...] = ()
@@ -54,6 +55,10 @@ class ReturnedZarrDecision:
     @property
     def eligible(self) -> bool:
         return self.outcome == "eligible"
+
+    @property
+    def unchanged_passthrough(self) -> bool:
+        return self.outcome == "skip-passthrough"
 
 
 @dataclass(frozen=True)
@@ -64,6 +69,16 @@ class NormalizedShallowResult:
     collection: ShallowCollection
     bytes_before: int
     bytes_after: int
+
+
+@dataclass(frozen=True)
+class ShallowRegistration:
+    """Resolved registration view for a shallow result or label projection."""
+
+    collection_root: Path
+    registration_path: Path
+    reference: ShallowZarrReference
+    kind: Literal["primary", "label"]
 
 
 def _safe_node_path(value: str) -> str:
@@ -104,6 +119,188 @@ def _write_json(path: Path, value: dict) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, path)
+
+
+def load_managed_storage_roots(
+    *,
+    import_mount_path: str | Path | None = None,
+    config_file: str | Path | None = None,
+    group_mappings_file: str | Path | None = None,
+) -> dict[str, Path]:
+    """Resolve managed roots from the shared runtime group mappings."""
+    import_root = Path(
+        import_mount_path or os.getenv("IMPORT_MOUNT_PATH", "/data")
+    ).resolve()
+    if not import_root.is_absolute():
+        raise ValueError("IMPORT_MOUNT_PATH must be absolute")
+
+    config_path = Path(config_file or os.getenv(
+        "OMERO_BIOMERO_CONFIG_FILE",
+        "/auto-importer/config/biomero-config.json",
+    ))
+    mappings_path = Path(group_mappings_file or os.getenv(
+        "OMERO_BIOMERO_GROUP_MAPPINGS_FILE",
+        "/auto-importer/config/group-mappings.json",
+    ))
+
+    def read_object(path: Path) -> dict:
+        if not path.is_file():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Cannot load managed storage mapping {path}") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"Managed storage mapping must be an object: {path}")
+        return value
+
+    legacy = read_object(config_path).get("group_mappings", {})
+    if not isinstance(legacy, dict):
+        raise ValueError("biomero-config.json group_mappings must be an object")
+    mappings = dict(legacy)
+    mappings.update(read_object(mappings_path))
+
+    roots = {"import-mount-data": import_root}
+    for group_id, mapping in mappings.items():
+        if not isinstance(mapping, dict):
+            raise ValueError(f"Invalid group mapping for {group_id!r}")
+        try:
+            normalized_id = int(group_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid group ID {group_id!r}") from exc
+        folder = mapping.get("folder")
+        if not folder or folder in {".", "root"}:
+            root = import_root
+        else:
+            folder_path = Path(str(folder))
+            if folder_path.is_absolute() or ".." in folder_path.parts:
+                raise ValueError(
+                    f"Group {normalized_id} folder must be relative to IMPORT_MOUNT_PATH"
+                )
+            root = (import_root / folder_path).resolve()
+            try:
+                root.relative_to(import_root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Group {normalized_id} folder escapes IMPORT_MOUNT_PATH"
+                ) from exc
+        roots[f"group-{normalized_id}-data"] = root
+    return roots
+
+
+def resolve_managed_source_path(
+    source,
+    storage_roots: dict[str, Path],
+) -> Path:
+    """Resolve a canonical source without allowing its locator to escape."""
+    root = storage_roots.get(source.storage_root)
+    if root is None:
+        raise ValueError(f"Unknown managed storage root {source.storage_root!r}")
+    root = Path(root).resolve()
+    candidate = (root / Path(source.relative_path)).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Canonical source escapes storage root {source.storage_root}"
+        ) from exc
+    if not candidate.is_dir():
+        raise ValueError(f"Canonical source is unavailable: {candidate}")
+    return candidate
+
+
+def resolve_shallow_registration(
+    zarr_path: str | Path,
+    *,
+    storage_roots: dict[str, Path] | None = None,
+    import_mount_path: str | Path | None = None,
+) -> ShallowRegistration | None:
+    """Resolve a primary shallow result or one of its label projections."""
+    path = Path(zarr_path).resolve()
+    import_root = Path(
+        import_mount_path or os.getenv("IMPORT_MOUNT_PATH", "/data")
+    ).resolve()
+    try:
+        path.relative_to(import_root)
+    except ValueError:
+        return None
+
+    collection_root = None
+    for candidate in (path, *path.parents):
+        try:
+            candidate.relative_to(import_root)
+        except ValueError:
+            break
+        if (candidate / SHALLOW_COLLECTION_MANIFEST).is_file():
+            collection_root = candidate
+            break
+        if candidate == import_root:
+            break
+    if collection_root is None:
+        return None
+
+    try:
+        collection = ShallowCollection.from_dict(json.loads(
+            (collection_root / SHALLOW_COLLECTION_MANIFEST).read_text(
+                encoding="utf-8"
+            )
+        ))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise PixelIdentityError(
+            f"Invalid shallow collection manifest: {collection_root}"
+        ) from exc
+
+    relative_node = (
+        "." if path == collection_root
+        else path.relative_to(collection_root).as_posix()
+    )
+    if relative_node == ".":
+        if len(collection.images) != 1:
+            raise PixelIdentityError(
+                "Primary registration currently requires one shallow image node"
+            )
+        image = collection.images[0]
+        kind = "primary"
+    else:
+        matches = [
+            image for image in collection.images
+            if relative_node in image.label_node_paths
+        ]
+        if len(matches) != 1:
+            raise PixelIdentityError(
+                f"Zarr path is not a declared shallow label: {path}"
+            )
+        image = matches[0]
+        kind = "label"
+
+    reference = ShallowZarrReference.from_collection(
+        collection,
+        storage_root="import-mount-data",
+        relative_path=collection_root.relative_to(import_root).as_posix(),
+        image_node_path=image.image_node_path,
+    )
+    if kind == "label":
+        registration_path = path
+    else:
+        roots = storage_roots or load_managed_storage_roots(
+            import_mount_path=import_root
+        )
+        registration_path = resolve_managed_source_path(image.source, roots)
+        if image.source.node_path != ".":
+            registration_path = _node_directory(
+                registration_path,
+                image.source.node_path,
+            )
+        if not registration_path.is_dir():
+            raise PixelIdentityError(
+                f"Shallow source image node is unavailable: {registration_path}"
+            )
+    return ShallowRegistration(
+        collection_root=collection_root,
+        registration_path=registration_path,
+        reference=reference,
+        kind=kind,
+    )
 
 
 def _discover_labels(root: Path, image_node_path: str) -> list[NgffNode]:
@@ -457,13 +654,6 @@ def evaluate_returned_zarr(
             reason="unsupported-multi-image-result",
             label_node_paths=label_paths,
         )
-    if not label_paths:
-        return ReturnedZarrDecision(
-            store_path=root,
-            outcome="keep-full",
-            reason="no-label-nodes",
-        )
-
     provider = identity_provider or IsccBioIdentityProvider()
     try:
         returned_identity = _identity_for_node(root, image_nodes[0], provider)
@@ -508,7 +698,16 @@ def evaluate_returned_zarr(
         else:
             reason = "no-input-identity-match"
 
-    eligible = reason == "input-image-unchanged"
+    unchanged = reason == "input-image-unchanged"
+    if unchanged and not label_paths:
+        return ReturnedZarrDecision(
+            store_path=root,
+            outcome="skip-passthrough",
+            reason="input-image-unchanged-no-labels",
+            image_identities=(returned_identity,),
+            matched_inputs=matches,
+        )
+    eligible = unchanged and bool(label_paths)
     return ReturnedZarrDecision(
         store_path=root,
         outcome="eligible" if eligible else "keep-full",
@@ -523,8 +722,12 @@ __all__ = [
     "NgffNode",
     "NormalizedShallowResult",
     "ReturnedZarrDecision",
+    "ShallowRegistration",
     "discover_ngff_nodes",
     "evaluate_returned_zarr",
     "find_returned_zarr_stores",
+    "load_managed_storage_roots",
     "normalize_returned_zarr",
+    "resolve_managed_source_path",
+    "resolve_shallow_registration",
 ]

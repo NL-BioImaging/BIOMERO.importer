@@ -14,6 +14,7 @@ from biomero_importer.utils.result_zarr import (
     evaluate_returned_zarr,
     find_returned_zarr_stores,
     normalize_returned_zarr,
+    resolve_shallow_registration,
 )
 
 
@@ -186,7 +187,7 @@ def test_changed_pixels_keep_full_even_when_artifact_matches(tmp_path):
     assert decision.reason == "pixels-changed"
 
 
-def test_result_without_labels_is_not_eligible(tmp_path):
+def test_unchanged_result_without_labels_is_a_passthrough(tmp_path):
     root = tmp_path / "result.zarr"
     _make_image(root)
     provider = IdentityProvider(_identity())
@@ -198,8 +199,25 @@ def test_result_without_labels_is_not_eligible(tmp_path):
     )
 
     assert not decision.eligible
-    assert decision.reason == "no-label-nodes"
-    assert provider.calls == []
+    assert decision.unchanged_passthrough
+    assert decision.reason == "input-image-unchanged-no-labels"
+    assert len(provider.calls) == 1
+
+
+def test_changed_result_without_labels_is_kept_full(tmp_path):
+    root = tmp_path / "result.zarr"
+    _make_image(root)
+
+    decision = evaluate_returned_zarr(
+        root,
+        _manifest(_input(0, "result.zarr")),
+        identity_provider=IdentityProvider(_identity("ISCC:ICHANGED")),
+    )
+
+    assert not decision.eligible
+    assert not decision.unchanged_passthrough
+    assert decision.outcome == "keep-full"
+    assert decision.reason == "pixels-changed"
 
 
 def test_store_finder_prunes_nested_label_zarrs(tmp_path):
@@ -277,3 +295,51 @@ def test_normalization_restores_full_store_when_commit_rename_fails(tmp_path):
 
     assert original_chunk.read_bytes() == b"image-pixels" * 2048
     assert not (root / ".biomero-shallow.json").exists()
+
+
+def test_resolves_primary_and_label_registration_views(tmp_path):
+    import_root = tmp_path / "data"
+    group_root = import_root / "Project A"
+    returned = import_root / "results/result.zarr"
+    canonical = group_root / ".processed/Image-1.ome.zarr"
+    _make_image(returned, labels=("cells",))
+    _make_image(canonical)
+    decision = evaluate_returned_zarr(
+        returned,
+        _manifest(_input(0, "result.zarr")),
+        identity_provider=IdentityProvider(_identity()),
+    )
+    normalize_returned_zarr(
+        decision,
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+    roots = {
+        "import-mount-data": import_root,
+        "group-0-data": group_root,
+    }
+
+    primary = resolve_shallow_registration(
+        returned,
+        storage_roots=roots,
+        import_mount_path=import_root,
+    )
+    label = resolve_shallow_registration(
+        returned / "labels/cells",
+        storage_roots=roots,
+        import_mount_path=import_root,
+    )
+
+    assert primary.kind == "primary"
+    assert primary.registration_path == canonical.resolve()
+    assert primary.reference.relative_path == "results/result.zarr"
+    assert primary.reference.label_node_paths == ("labels/cells",)
+    assert label.kind == "label"
+    assert label.registration_path == (returned / "labels/cells").resolve()
+    assert label.reference == primary.reference
+
+
+def test_shallow_registration_returns_none_outside_import_mount(tmp_path):
+    assert resolve_shallow_registration(
+        tmp_path / "outside.zarr",
+        import_mount_path=tmp_path / "data",
+    ) is None
