@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+from threading import Lock
 from time import perf_counter
 from uuid import UUID, uuid4
 
@@ -105,24 +106,31 @@ class TimedIdentityProvider:
         self.delegate = IsccBioIdentityProvider()
         self.timings = defaultdict(float)
         self.calls = defaultdict(int)
+        self.lock = Lock()
 
     def generate(self, root, **kwargs):
         role = kwargs["role"]
-        self.calls[role] += 1
-        return timed_call(
-            self.timings,
-            f"hash_{role}_seconds",
-            self.delegate.generate,
-            root,
-            **kwargs,
-        )
+        started = perf_counter()
+        try:
+            return self.delegate.generate(root, **kwargs)
+        finally:
+            elapsed = perf_counter() - started
+            with self.lock:
+                self.calls[role] += 1
+                self.timings[f"hash_{role}_seconds"] += elapsed
 
 
-def profile_identity(root: Path, manifest_path: Path):
+def profile_identity(
+    root: Path,
+    manifest_path: Path,
+    *,
+    identity_workers: int = 1,
+):
     _, canonical, _ = build_contracts(root, manifest_path)
     provider = TimedIdentityProvider()
     timings = defaultdict(float)
     original_discover = rz.discover_ngff_nodes
+    original_identity_batch = rz._identities_for_nodes
 
     def discover(*args, **kwargs):
         return timed_call(
@@ -133,26 +141,46 @@ def profile_identity(root: Path, manifest_path: Path):
             **kwargs,
         )
 
+    def identity_batch(root, nodes, identity_provider, **kwargs):
+        role = nodes[0].role if nodes else "empty"
+        return timed_call(
+            timings,
+            f"hash_{role}_phase_seconds",
+            original_identity_batch,
+            root,
+            nodes,
+            identity_provider,
+            **kwargs,
+        )
+
     rz.discover_ngff_nodes = discover
+    rz._identities_for_nodes = identity_batch
     started = perf_counter()
     try:
         decision = rz.evaluate_returned_zarr(
             root,
             canonical,
             identity_provider=provider,
+            identity_workers=identity_workers,
         )
     finally:
         rz.discover_ngff_nodes = original_discover
+        rz._identities_for_nodes = original_identity_batch
     total = perf_counter() - started
     return {
         "total_seconds": total,
         **timings,
-        **provider.timings,
+        "aggregate_image_worker_seconds": provider.timings[
+            "hash_image_seconds"
+        ],
+        "aggregate_label_worker_seconds": provider.timings[
+            "hash_label_seconds"
+        ],
         "image_hash_calls": provider.calls["image"],
         "label_hash_calls": provider.calls["label"],
+        "identity_workers": identity_workers,
         "decision": decision.outcome,
-        "unaccounted_seconds": total - sum(timings.values())
-        - sum(provider.timings.values()),
+        "unaccounted_seconds": total - sum(timings.values()),
     }
 
 
@@ -352,9 +380,19 @@ def main():
     parser.add_argument("--legacy-root", type=Path)
     parser.add_argument("--move-root", type=Path)
     parser.add_argument("--move-fast-root", type=Path)
+    parser.add_argument("--identity-only-root", type=Path)
+    parser.add_argument("--identity-workers", type=int, default=1)
     parser.add_argument("--manifest", type=Path, required=True)
     args = parser.parse_args()
-    if args.move_fast_root is not None:
+    if args.identity_only_root is not None:
+        result = {
+            "identity_verification": profile_identity(
+                args.identity_only_root,
+                args.manifest,
+                identity_workers=args.identity_workers,
+            ),
+        }
+    elif args.move_fast_root is not None:
         result = {
             "move_journal_without_size_scans": profile_move_normalize(
                 args.move_fast_root,
@@ -370,7 +408,9 @@ def main():
             )
         result = {
             "identity_verification": profile_identity(
-                args.identity_root, args.manifest
+                args.identity_root,
+                args.manifest,
+                identity_workers=args.identity_workers,
             ),
             "legacy_copy_staging": legacy_stage_normalize(
                 args.legacy_root, args.manifest

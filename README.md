@@ -94,10 +94,15 @@ The system uses these environment variables:
 - `OMERO_PORT`: OMERO server port
 - `PODMAN_USERNS_MODE`: Set to "keep-id" for Linux user namespace mapping in preprocessing
 - `USE_REGISTER_ZARR`: Set to "true" to enable zarr register script - requires omero-zarr-pixel-buffer (overrides config file setting)
+- `BIOMERO_SHALLOW_ZARR`: Opt in to the native `biomero.shallow-zarr`
+  lifecycle operation. Existing orders are unchanged when false or absent.
+- `BIOMERO_SHALLOW_ZARR_WORKERS`: Bounded ISCC-BIO identity workers used by
+  the importer service (default `1`). This is deployment configuration, not a
+  client-controlled import option.
 
 ## Creating Upload Orders
 
-Upload orders are typically created through a user interface, such as the OMERO.biomero plugin (Importer tab) at `/omero_biomero/biomero/`, an OMERO.web extension. However, orders can also be created programmatically using the database API. 
+Upload orders are typically created through a user interface, such as the OMERO.biomero plugin (Importer tab) at `/omero_biomero/biomero/`, an OMERO.web extension. However, orders can also be created programmatically. New integrations should call `biomero_importer.submit_import_order(order)` and inspect `biomero_importer.get_importer_capabilities()` before requesting an optional lifecycle operation. The API validates and writes the same append-only database order used by existing clients; direct legacy database writers remain supported.
 
 You can use the provided test scripts shown below as examples. 
 You can also configure some more settings for them: 
@@ -112,6 +117,19 @@ sample_parent_type: "Dataset"  # or "Screen"
 ```
 
 ### BIOMERO shallow Plate registration
+
+Native importer lifecycle operations are carried in the versioned
+`ImportOptionsEnvelope` from `biomero-schema`. They execute after any existing
+container preprocessing and before OMERO registration. This means a direct
+Zarr or a Zarr produced by the existing converter can request the same
+post-processing behavior. The lifecycle engine returns a registration plan and
+does not depend on `register.py`; a future OMERO CLI Zarr importer can consume
+the same plan.
+
+Empty options and the earlier flat schema-1 registration options are upcast to
+an envelope with no operations, so they continue through the established
+import path. `imports_preprocessing` remains the legacy external-container
+contract and is not repurposed for native operations.
 
 BIOMERO workflow result orders may include an `ImportOptions` object defined by
 `biomero-schema`. For a managed shallow Plate, the default
@@ -691,4 +709,3 @@ py -3.12 -m venv .venv
 ## LICENSE
 
 License changed to GPL-2.0 (starting version 1.3), as this work depends on `omero-py` and `ezomero` libraries for the OMERO import and session management.
-

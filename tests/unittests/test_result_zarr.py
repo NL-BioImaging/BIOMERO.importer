@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from threading import Barrier, Lock, get_ident
 from uuid import UUID
 
 from biomero_schema.zarr import (
@@ -191,6 +192,21 @@ class NodeIdentityProvider:
         return self.identities[kwargs["node_path"]]
 
 
+class ConcurrentNodeIdentityProvider(NodeIdentityProvider):
+    def __init__(self, identities, parties):
+        super().__init__(identities)
+        self.barrier = Barrier(parties)
+        self.lock = Lock()
+        self.thread_ids = set()
+
+    def generate(self, root, **kwargs):
+        with self.lock:
+            self.calls.append((Path(root), kwargs))
+            self.thread_ids.add(get_ident())
+        self.barrier.wait(timeout=5)
+        return self.identities[kwargs["node_path"]]
+
+
 def test_discovers_image_and_declared_labels(tmp_path):
     root = tmp_path / "result.zarr"
     _make_image(root, labels=("cells", "nuclei"))
@@ -216,6 +232,58 @@ def test_discovers_plate_image_level_labels(tmp_path):
         ("A/1/0", "image"),
         ("A/1/0/labels/cells", "label"),
     ]
+
+
+def test_evaluation_hashes_plate_images_and_labels_concurrently_in_order(
+    tmp_path,
+):
+    root = tmp_path / "plate.zarr"
+    _make_plate(root, {
+        "A/1/0": ("cells",),
+        "B/1/0": ("cells",),
+    })
+    provider = ConcurrentNodeIdentityProvider({
+        "A/1/0": _identity("ISCC:IA", "A/1/0"),
+        "B/1/0": _identity("ISCC:IB", "B/1/0"),
+        "A/1/0/labels/cells": _identity(
+            "ISCC:IALABEL",
+            "A/1/0/labels/cells",
+            "label",
+        ),
+        "B/1/0/labels/cells": _identity(
+            "ISCC:IBLABEL",
+            "B/1/0/labels/cells",
+            "label",
+        ),
+    }, parties=2)
+
+    decision = evaluate_returned_zarr(
+        root,
+        _manifest(_plate_input()),
+        identity_provider=provider,
+        identity_workers=2,
+    )
+
+    assert decision.eligible
+    assert tuple(
+        identity.node_path for identity in decision.image_identities
+    ) == ("A/1/0", "B/1/0")
+    assert tuple(
+        identity.node_path for identity in decision.label_identities
+    ) == (
+        "A/1/0/labels/cells",
+        "B/1/0/labels/cells",
+    )
+    assert len(provider.thread_ids) == 2
+
+
+def test_evaluation_rejects_invalid_identity_worker_count(tmp_path):
+    try:
+        evaluate_returned_zarr(tmp_path, None, identity_workers=0)
+    except ValueError as exc:
+        assert "positive integer" in str(exc)
+    else:
+        raise AssertionError("invalid identity worker count was accepted")
 
 
 def test_unchanged_plate_without_labels_is_a_passthrough(tmp_path):

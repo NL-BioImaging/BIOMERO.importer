@@ -6,7 +6,9 @@ caller can therefore run it in keep-only mode and safely retain every result
 when discovery or identity matching is incomplete.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -859,6 +861,30 @@ def _identity_for_node(
     )
 
 
+def _identities_for_nodes(
+    root: Path,
+    nodes: tuple[NgffNode, ...],
+    identity_provider: IsccBioIdentityProvider,
+    *,
+    max_workers: int = 1,
+) -> tuple[PixelIdentity, ...]:
+    """Generate identities in node order with optional bounded concurrency."""
+    if isinstance(max_workers, bool) or not isinstance(max_workers, int):
+        raise ValueError("Identity workers must be a positive integer")
+    if max_workers < 1:
+        raise ValueError("Identity workers must be a positive integer")
+    generate = partial(_identity_for_node, root, identity_provider=identity_provider)
+    if max_workers == 1 or len(nodes) < 2:
+        return tuple(generate(node) for node in nodes)
+    with ThreadPoolExecutor(
+        max_workers=min(max_workers, len(nodes)),
+        thread_name_prefix="biomero-iscc",
+    ) as executor:
+        # executor.map preserves the discovered node order even when workers
+        # finish out of order, keeping manifests and comparisons deterministic.
+        return tuple(executor.map(generate, nodes))
+
+
 def _declared_image_dataset_directories(
     root: Path,
     image_node_path: str,
@@ -1135,6 +1161,7 @@ def evaluate_returned_zarr(
     canonical_inputs: CanonicalInputManifest | None,
     *,
     identity_provider: IsccBioIdentityProvider | None = None,
+    identity_workers: int = 1,
 ) -> ReturnedZarrDecision:
     """Compare one returned image store with its workflow-scoped inputs.
 
@@ -1142,6 +1169,12 @@ def evaluate_returned_zarr(
     store, which makes failures and unsupported cases unconditionally fail
     open to ``keep-full``.
     """
+    if (
+        isinstance(identity_workers, bool)
+        or not isinstance(identity_workers, int)
+        or identity_workers < 1
+    ):
+        raise ValueError("Identity workers must be a positive integer")
     root = Path(zarr_root)
     if canonical_inputs is None or not canonical_inputs.inputs:
         return ReturnedZarrDecision(
@@ -1170,9 +1203,11 @@ def evaluate_returned_zarr(
         )
     provider = identity_provider or IsccBioIdentityProvider()
     try:
-        returned_identities = tuple(
-            _identity_for_node(root, node, provider)
-            for node in image_nodes
+        returned_identities = _identities_for_nodes(
+            root,
+            image_nodes,
+            provider,
+            max_workers=identity_workers,
         )
     except PixelIdentityError as exc:
         return ReturnedZarrDecision(
@@ -1257,10 +1292,11 @@ def evaluate_returned_zarr(
         )
 
     try:
-        label_identities = tuple(
-            _identity_for_node(root, node, provider)
-            for node in nodes
-            if node.role == "label"
+        label_identities = _identities_for_nodes(
+            root,
+            tuple(node for node in nodes if node.role == "label"),
+            provider,
+            max_workers=identity_workers,
         )
     except PixelIdentityError as exc:
         return ReturnedZarrDecision(
