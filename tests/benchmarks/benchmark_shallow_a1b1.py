@@ -28,7 +28,13 @@ from biomero_schema.zarr import (
     SHALLOW_COLLECTION_MANIFEST,
     ShallowCollection,
 )
+from biomero_schema.imports import (
+    ImportOptionsEnvelope,
+    ShallowZarrImportOperation,
+)
 
+from biomero_importer.utils import lifecycle as lifecycle_module
+from biomero_importer.utils.lifecycle import ImportLifecycleEngine
 from biomero_importer.utils import result_zarr as rz
 from biomero_importer.utils.pixel_identity import IsccBioIdentityProvider
 
@@ -368,6 +374,66 @@ def profile_move_normalize(
     }
 
 
+def profile_importer_lifecycle(root: Path, manifest_path: Path):
+    """Profile the production importer-owned evaluate/normalize hand-off."""
+
+    _, canonical, _ = build_contracts(root, manifest_path)
+    options = ImportOptionsEnvelope(operations=(
+        ShallowZarrImportOperation(canonicalInputs=canonical),
+    ))
+    timings = defaultdict(float)
+    original_evaluate = lifecycle_module.evaluate_returned_zarr
+    original_normalize = lifecycle_module.normalize_returned_zarr
+
+    def evaluate(*args, **kwargs):
+        return timed_call(
+            timings,
+            "identity_evaluation_seconds",
+            original_evaluate,
+            *args,
+            **kwargs,
+        )
+
+    def normalize(*args, **kwargs):
+        return timed_call(
+            timings,
+            "normalization_seconds",
+            original_normalize,
+            *args,
+            **kwargs,
+        )
+
+    bytes_before = rz._tree_size(root)
+    lifecycle_module.evaluate_returned_zarr = evaluate
+    lifecycle_module.normalize_returned_zarr = normalize
+    started = perf_counter()
+    try:
+        plan = ImportLifecycleEngine().prepare((root,), options)
+    finally:
+        lifecycle_module.evaluate_returned_zarr = original_evaluate
+        lifecycle_module.normalize_returned_zarr = original_normalize
+    total = perf_counter() - started
+    bytes_after = rz._tree_size(root)
+    roles = defaultdict(int)
+    for item in plan.items:
+        roles[item.role] += 1
+    return {
+        "total_seconds": total,
+        **timings,
+        "bytes_before": bytes_before,
+        "bytes_after": bytes_after,
+        "bytes_saved": bytes_before - bytes_after,
+        "saved_percent": (
+            100 * (bytes_before - bytes_after) / bytes_before
+            if bytes_before else 0
+        ),
+        "decision": plan.decisions[0].outcome if plan.decisions else None,
+        "prepared_items": len(plan.items),
+        "prepared_roles": dict(sorted(roles.items())),
+        "unaccounted_seconds": total - sum(timings.values()),
+    }
+
+
 def rounded(value):
     if isinstance(value, float):
         return round(value, 3)
@@ -381,10 +447,18 @@ def main():
     parser.add_argument("--move-root", type=Path)
     parser.add_argument("--move-fast-root", type=Path)
     parser.add_argument("--identity-only-root", type=Path)
+    parser.add_argument("--lifecycle-root", type=Path)
     parser.add_argument("--identity-workers", type=int, default=1)
     parser.add_argument("--manifest", type=Path, required=True)
     args = parser.parse_args()
-    if args.identity_only_root is not None:
+    if args.lifecycle_root is not None:
+        result = {
+            "importer_lifecycle": profile_importer_lifecycle(
+                args.lifecycle_root,
+                args.manifest,
+            ),
+        }
+    elif args.identity_only_root is not None:
         result = {
             "identity_verification": profile_identity(
                 args.identity_only_root,
