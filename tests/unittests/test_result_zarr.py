@@ -273,6 +273,7 @@ def test_normalizes_plate_images_and_retains_image_level_label(tmp_path):
     normalized = normalize_returned_zarr(
         decision,
         "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        measure_bytes=True,
     )
 
     assert decision.eligible
@@ -493,6 +494,7 @@ def test_normalization_transaction_keeps_labels_and_omits_image_chunks(
     normalized = normalize_returned_zarr(
         decision,
         "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        measure_bytes=True,
     )
 
     assert not (root / "0").exists()
@@ -513,10 +515,22 @@ def test_normalization_transaction_keeps_labels_and_omits_image_chunks(
     assert not list(tmp_path.glob(".result.zarr.biomero-*"))
 
 
-def test_normalization_restores_full_store_when_commit_rename_fails(tmp_path):
+def test_normalization_restores_full_store_when_array_move_fails(tmp_path):
     root = tmp_path / "result.zarr"
     _make_image(root, labels=("cells",))
     original_chunk = root / "0/0.0.0.0"
+    attrs_path = root / ".zattrs"
+    attrs = json.loads(attrs_path.read_text(encoding="utf-8"))
+    attrs["multiscales"][0]["datasets"].append({"path": "1"})
+    _write_json(attrs_path, attrs)
+    _write_json(root / "1/.zarray", {
+        "zarr_format": 2,
+        "shape": [1, 1, 4, 4],
+        "chunks": [1, 1, 4, 4],
+        "dtype": "<u2",
+    })
+    second_chunk = root / "1/0.0.0.0"
+    second_chunk.write_bytes(b"second-image-pyramid")
     decision = evaluate_returned_zarr(
         root,
         _manifest(_input(0, "result.zarr")),
@@ -543,7 +557,41 @@ def test_normalization_restores_full_store_when_commit_rename_fails(tmp_path):
         raise AssertionError("normalization unexpectedly succeeded")
 
     assert original_chunk.read_bytes() == b"image-pixels" * 2048
+    assert second_chunk.read_bytes() == b"second-image-pyramid"
+    assert json.loads(attrs_path.read_text(encoding="utf-8")) == attrs
     assert not (root / ".biomero-shallow.json").exists()
+    assert not list(tmp_path.glob(".result.zarr.biomero-*"))
+
+
+def test_normalization_moves_arrays_without_copying_retained_tree(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "result.zarr"
+    _make_image(root, labels=("cells",))
+    decision = evaluate_returned_zarr(
+        root,
+        _manifest(_input(0, "result.zarr")),
+        identity_provider=IdentityProvider(_identity()),
+    )
+
+    def fail_copytree(*args, **kwargs):
+        raise AssertionError("normalization must not copy the retained tree")
+
+    monkeypatch.setattr(
+        "biomero_importer.utils.result_zarr.shutil.copytree",
+        fail_copytree,
+    )
+
+    normalized = normalize_returned_zarr(
+        decision,
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    )
+
+    assert normalized.bytes_before is None
+    assert normalized.bytes_after is None
+    assert not (root / "0").exists()
+    assert (root / "labels/cells/0/0.0.0.0").exists()
 
 
 def test_resolves_primary_and_label_registration_views(tmp_path):

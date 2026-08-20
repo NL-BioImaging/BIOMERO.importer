@@ -69,12 +69,12 @@ class ReturnedZarrDecision:
 
 @dataclass(frozen=True)
 class NormalizedShallowResult:
-    """Committed shallow collection and its measured storage reduction."""
+    """Committed shallow collection and optional storage measurements."""
 
     store_path: Path
     collection: ShallowCollection
-    bytes_before: int
-    bytes_after: int
+    bytes_before: int | None
+    bytes_after: int | None
 
 
 @dataclass(frozen=True)
@@ -135,6 +135,13 @@ def _write_json(path: Path, value: dict) -> None:
         json.dumps(value, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    os.replace(temporary, path)
+
+
+def _write_bytes(path: Path, value: bytes) -> None:
+    """Atomically restore file content used by normalization rollback."""
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    temporary.write_bytes(value)
     os.replace(temporary, path)
 
 
@@ -910,13 +917,21 @@ def normalize_returned_zarr(
     workflow_id: UUID | str,
     *,
     replace=os.replace,
+    measure_bytes: bool = False,
 ) -> NormalizedShallowResult:
-    """Transactionally omit a verified duplicate image from a result store.
+    """Transactionally omit verified duplicate arrays from a result store.
 
-    A new sibling store is assembled from metadata and retained labels. Only
-    after that store and its manifest validate do atomic renames make it live.
-    The canonical source is never modified. Unsupported inputs raise before
-    the original result is moved.
+    Duplicate image arrays are atomically moved into a sibling rollback
+    journal.  Labels and metadata stay in place, avoiding a costly copy of the
+    retained side of a large Plate.  The manifest is committed only after all
+    moves and metadata updates validate.  Any pre-commit failure restores the
+    original attributes and moves every array back.  The canonical source is
+    never modified.
+
+    Exact byte measurement is disabled by default because recursively stating
+    every file in a Plate can dominate the complete transaction on a mounted
+    filesystem.  ``measure_bytes`` is intended for diagnostics and benchmarks,
+    not the interactive import path.
     """
     if not decision.eligible or len(decision.matched_inputs) != 1:
         raise PixelIdentityError("Returned Zarr is not eligible for shallowing")
@@ -1006,27 +1021,50 @@ def normalize_returned_zarr(
         _node_directory(root, label_path)
         for label_path in inherited_label_paths
     )
+    # Moving whole Zarr array directories on one filesystem is metadata-only.
+    # Keep only top-level omitted directories so a future nested declaration
+    # cannot cause the same subtree to be moved twice.
+    minimal_omitted = []
+    for directory in sorted(
+        omitted,
+        key=lambda path: len(path.relative_to(root).parts),
+    ):
+        if not any(
+            directory.is_relative_to(parent)
+            for parent in minimal_omitted
+        ):
+            minimal_omitted.append(directory)
+
     token = uuid4().hex
-    staging = root.with_name(f".{root.name}.biomero-stage-{token}")
-    backup = root.with_name(f".{root.name}.biomero-full-{token}")
-    bytes_before = _tree_size(root)
+    rollback = root.with_name(f".{root.name}.biomero-prune-{token}")
+    bytes_before = _tree_size(root) if measure_bytes else None
+    manifest_path = root / SHALLOW_COLLECTION_MANIFEST
+    if manifest_path.exists():
+        raise PixelIdentityError(
+            f"Returned store already has {SHALLOW_COLLECTION_MANIFEST}"
+        )
 
-    def ignore(directory, names):
-        current = Path(directory)
-        return {
-            name for name in names
-            if current / name in omitted
-        }
-
-    moved_original = False
-    committed = False
+    moved_directories = []
+    original_attrs = {}
     try:
-        shutil.copytree(root, staging, symlinks=True, ignore=ignore)
+        rollback.mkdir()
+        for directory in minimal_omitted:
+            if not directory.is_dir():
+                raise PixelIdentityError(
+                    f"Returned array disappeared before normalization: "
+                    f"{directory}"
+                )
+            target = rollback / directory.relative_to(root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            replace(directory, target)
+            moved_directories.append((directory, target))
+
         for image_node in image_nodes:
             staging_attrs_path = _node_directory(
-                staging,
+                root,
                 image_node.node_path,
             ) / ".zattrs"
+            original_attrs[staging_attrs_path] = staging_attrs_path.read_bytes()
             staging_attrs = _read_attrs(staging_attrs_path.parent)
             staging_attrs.pop("multiscales", None)
             staging_attrs["biomero"] = {
@@ -1036,19 +1074,19 @@ def normalize_returned_zarr(
             }
             _write_json(staging_attrs_path, staging_attrs)
         _write_json(
-            staging / SHALLOW_COLLECTION_MANIFEST,
+            manifest_path,
             collection.to_dict(),
         )
 
         validated = ShallowCollection.from_dict(json.loads(
-            (staging / SHALLOW_COLLECTION_MANIFEST).read_text(
+            manifest_path.read_text(
                 encoding="utf-8"
             )
         ))
         if validated != collection:
             raise PixelIdentityError("Shallow collection manifest changed")
         for label in label_nodes:
-            label_dir = _node_directory(staging, label.node_path)
+            label_dir = _node_directory(root, label.node_path)
             if label.node_path in inherited_label_paths:
                 if label_dir.exists():
                     raise PixelIdentityError(
@@ -1060,35 +1098,36 @@ def normalize_returned_zarr(
                     f"Staged shallow result lost label node {label.node_path}"
                 )
         for dataset in omitted:
-            staged_dataset = staging / dataset.relative_to(root)
-            if staged_dataset.exists():
+            if dataset.exists():
                 raise PixelIdentityError(
-                    f"Staged shallow result retained image dataset {dataset}"
+                    f"Shallow result retained image dataset {dataset}"
                 )
+        bytes_after = _tree_size(root) if measure_bytes else None
+    except Exception:
+        # Restore metadata before the arrays so readers never see valid
+        # multiscales pointing at only a partially restored pyramid.
+        if manifest_path.exists():
+            manifest_path.unlink()
+        for path, value in original_attrs.items():
+            _write_bytes(path, value)
+        for original, target in reversed(moved_directories):
+            original.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                replace(target, original)
+        if rollback.exists():
+            shutil.rmtree(rollback, ignore_errors=True)
+        raise
 
-        replace(root, backup)
-        moved_original = True
-        try:
-            replace(staging, root)
-            committed = True
-        except Exception:
-            replace(backup, root)
-            moved_original = False
-            raise
-        bytes_after = _tree_size(root)
-        shutil.rmtree(backup)
-        moved_original = False
-        return NormalizedShallowResult(
-            store_path=root,
-            collection=collection,
-            bytes_before=bytes_before,
-            bytes_after=bytes_after,
-        )
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        if moved_original and not committed and backup.exists() and not root.exists():
-            replace(backup, root)
+    # Validation is the commit boundary. Cleanup only unlinks verified
+    # duplicate pixels, so it must not attempt a rollback after a partial
+    # filesystem deletion.
+    shutil.rmtree(rollback)
+    return NormalizedShallowResult(
+        store_path=root,
+        collection=collection,
+        bytes_before=bytes_before,
+        bytes_after=bytes_after,
+    )
 
 
 def evaluate_returned_zarr(
