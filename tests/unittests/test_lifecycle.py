@@ -9,6 +9,7 @@ from biomero_schema.imports import (
     ShallowZarrImportOperation,
 )
 from biomero_schema.zarr import (
+    TRANSFER_INPUT_MARKER,
     CanonicalInputManifest,
     CanonicalZarrSource,
     PixelIdentity,
@@ -115,6 +116,7 @@ def test_shallow_operation_is_disabled_by_default(tmp_path, monkeypatch):
 
 def test_eligible_image_becomes_label_registration_view(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
+    (root / TRANSFER_INPUT_MARKER).write_text("{}", encoding="utf-8")
     collection = _collection()
     decision = ReturnedZarrDecision(
         store_path=root,
@@ -143,6 +145,7 @@ def test_eligible_image_becomes_label_registration_view(tmp_path, monkeypatch):
         (root / "labels" / "nuclei", "image-label")
     ]
     assert plan.decisions == (decision,)
+    assert not (root / TRANSFER_INPUT_MARKER).exists()
 
 
 def test_existing_manifest_is_idempotently_reused(tmp_path, monkeypatch):

@@ -25,6 +25,7 @@ from .result_zarr import (
     discover_ngff_nodes,
     evaluate_returned_zarr,
     normalize_returned_zarr,
+    remove_transfer_input_marker,
 )
 
 
@@ -279,6 +280,10 @@ class ImportLifecycleEngine:
                 decision.outcome,
                 decision.reason,
             )
+            if remove_transfer_input_marker(root):
+                self.logger.info(
+                    "Consumed temporary Zarr input marker for %s", root
+                )
             if decision.unchanged_passthrough:
                 continue
             if not decision.eligible:

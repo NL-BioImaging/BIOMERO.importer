@@ -4,6 +4,7 @@ from threading import Barrier, Lock, get_ident
 from uuid import UUID
 
 from biomero_schema.zarr import (
+    TRANSFER_INPUT_MARKER,
     CanonicalInput,
     CanonicalInputManifest,
     CanonicalPlateImage,
@@ -405,6 +406,41 @@ def test_transfer_artifact_disambiguates_duplicate_input_identities(tmp_path):
     assert decision.eligible
     assert decision.reason == "input-image-unchanged"
     assert decision.matched_inputs[0].ordinal == 1
+
+
+def test_transfer_input_marker_disambiguates_renamed_duplicate_identity(tmp_path):
+    root = tmp_path / "second__segmentation.ome.zarr"
+    _make_image(root, labels=("cells",))
+    provider = IdentityProvider(_identity())
+    selected = _input(1, "second.zarr")
+    manifest = _manifest(_input(0, "first.zarr"), selected)
+    _write_json(root / TRANSFER_INPUT_MARKER, selected.to_dict())
+
+    decision = evaluate_returned_zarr(
+        root,
+        manifest,
+        identity_provider=provider,
+    )
+
+    assert decision.eligible
+    assert decision.reason == "input-image-unchanged"
+    assert decision.matched_inputs == (selected,)
+
+
+def test_untrusted_transfer_input_marker_fails_closed(tmp_path):
+    root = tmp_path / "result.ome.zarr"
+    _make_image(root, labels=("cells",))
+    manifest = _manifest(_input(0, "first.zarr"))
+    _write_json(root / TRANSFER_INPUT_MARKER, _input(9, "other.zarr").to_dict())
+
+    decision = evaluate_returned_zarr(
+        root,
+        manifest,
+        identity_provider=IdentityProvider(_identity()),
+    )
+
+    assert decision.outcome == "keep-full"
+    assert decision.reason == "untrusted-transfer-input-marker"
 
 
 def test_classifies_inherited_new_and_changed_labels(tmp_path):

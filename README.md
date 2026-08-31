@@ -97,8 +97,8 @@ The system uses these environment variables:
 - `BIOMERO_SHALLOW_ZARR`: Opt in to the native `biomero.shallow-zarr`
   lifecycle operation. Existing orders are unchanged when false or absent.
 - `BIOMERO_SHALLOW_ZARR_WORKERS`: Bounded ISCC-BIO identity workers used by
-  the importer service (default `1`). This is deployment configuration, not a
-  client-controlled import option.
+  the importer service (library fallback `1`; NL-BIOMERO supplies `4`). This is
+  deployment configuration, not a client-controlled import option.
 
 ## Creating Upload Orders
 
@@ -139,6 +139,14 @@ optional `{"platePixelSource":"label","plateLabelName":"nuclei"}` registers
 the same hierarchy against that label under every image node, producing a
 mask-backed Plate view without copying arrays. BIOMERO creates these orders;
 ordinary importer clients can omit `ImportOptions`.
+
+BIOMERO-generated workflow inputs may carry `.biomero-input.json`, containing
+one serialized `CanonicalInput`. The importer accepts it only when it exactly
+matches the authoritative `CanonicalInputManifest` in the lifecycle operation,
+then independently verifies the returned pixels. This disambiguates renamed
+outputs derived from separately selected Images with identical content. The
+temporary marker is consumed before registration; missing markers retain the
+existing artifact-name and content-identity fallback.
 
 The shallow collection remains the authoritative in-place result and receives
 a compact Plate-level OMERO annotation. Label-backed registration requires the

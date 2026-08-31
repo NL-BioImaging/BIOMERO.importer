@@ -22,6 +22,7 @@ from biomero_schema.zarr import (
     ManagedZarrNode,
     PixelIdentity,
     SHALLOW_COLLECTION_MANIFEST,
+    TRANSFER_INPUT_MARKER,
     ShallowCollection,
     ShallowImageReference,
     ShallowPlateReference,
@@ -1183,6 +1184,26 @@ def evaluate_returned_zarr(
             reason="no-canonical-input-snapshot",
         )
 
+    marker_path = root / TRANSFER_INPUT_MARKER
+    marked_input = None
+    if marker_path.is_file():
+        try:
+            marked_input = CanonicalInput.from_dict(json.loads(
+                marker_path.read_text(encoding="utf-8")
+            ))
+        except (OSError, json.JSONDecodeError, ValueError):
+            return ReturnedZarrDecision(
+                store_path=root,
+                outcome="keep-full",
+                reason="invalid-transfer-input-marker",
+            )
+        if marked_input not in canonical_inputs.inputs:
+            return ReturnedZarrDecision(
+                store_path=root,
+                outcome="keep-full",
+                reason="untrusted-transfer-input-marker",
+            )
+
     try:
         nodes = discover_ngff_nodes(root)
     except PixelIdentityError as exc:
@@ -1246,32 +1267,40 @@ def evaluate_returned_zarr(
             for node_path, source in sources.items()
         )
 
-    artifact_matches = tuple(
-        item for item in canonical_inputs.inputs
-        if item.transfer_artifact == root.name
-    )
-    if len(artifact_matches) > 1:
-        reason = "ambiguous-transfer-artifact"
-        matches = ()
-    elif len(artifact_matches) == 1:
-        matches = artifact_matches
+    if marked_input is not None:
+        matches = (marked_input,)
         reason = (
             unchanged_reason
             if input_matches(matches[0])
             else "pixels-changed"
         )
     else:
-        matches = tuple(
+        artifact_matches = tuple(
             item for item in canonical_inputs.inputs
-            if input_matches(item)
+            if item.transfer_artifact == root.name
         )
-        if len(matches) == 1:
-            reason = unchanged_reason
-        elif len(matches) > 1:
-            reason = "ambiguous-input-identity"
+        if len(artifact_matches) > 1:
+            reason = "ambiguous-transfer-artifact"
             matches = ()
+        elif len(artifact_matches) == 1:
+            matches = artifact_matches
+            reason = (
+                unchanged_reason
+                if input_matches(matches[0])
+                else "pixels-changed"
+            )
         else:
-            reason = "no-input-identity-match"
+            matches = tuple(
+                item for item in canonical_inputs.inputs
+                if input_matches(item)
+            )
+            if len(matches) == 1:
+                reason = unchanged_reason
+            elif len(matches) > 1:
+                reason = "ambiguous-input-identity"
+                matches = ()
+            else:
+                reason = "no-input-identity-match"
 
     unchanged = reason == unchanged_reason
     if unchanged and not label_paths:
@@ -1345,6 +1374,16 @@ def evaluate_returned_zarr(
     )
 
 
+def remove_transfer_input_marker(zarr_root: str | Path) -> bool:
+    """Remove the temporary input binding before managed result storage."""
+    marker = Path(zarr_root) / TRANSFER_INPUT_MARKER
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 __all__ = [
     "NgffNode",
     "MaterializedShallowResult",
@@ -1357,6 +1396,7 @@ __all__ = [
     "load_managed_storage_roots",
     "materialize_shallow_zarr",
     "normalize_returned_zarr",
+    "remove_transfer_input_marker",
     "resolve_managed_source_path",
     "resolve_shallow_registration",
 ]
