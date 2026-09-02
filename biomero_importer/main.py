@@ -277,7 +277,8 @@ class DatabasePoller:
                             'DestinationID': order.destination_id,
                             'DestinationType': order.destination_type,
                             'Files': order.files,
-                            'FileNames': order.file_names
+                            'FileNames': order.file_names,
+                            'ImportOptions': order.import_options,
                         }
 
                         # Add preprocessing details if they exist

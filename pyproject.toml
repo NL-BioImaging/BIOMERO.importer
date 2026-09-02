@@ -30,7 +30,8 @@ dependencies = [
     "sqlalchemy>=2.0.28",
     "psycopg2>=2.9.7",
     "zarr>=3",
-    "alembic>=1.13"
+    "alembic>=1.13",
+    "biomero-schema>=0.2,<0.3"
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,9 @@ test = [
     "pytest-cov",
     "mock",
     "psycopg2-binary"
+]
+identity = [
+    "iscc-bio[ome-zarr-plugin] @ git+https://github.com/bio-codes/iscc-bio.git@c536d7699b7d25592bfe5c91c947b749344b6914"
 ]
 
 [tool.setuptools.packages]

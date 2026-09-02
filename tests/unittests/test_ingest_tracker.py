@@ -53,7 +53,12 @@ def test_log_ingestion_step(setup_database):
         'UUID': '123e4567-e89b-12d3-a456-426614174000',
         'DestinationID': 'test_dataset_id',  # Added missing field
         'Files': ["/path/to/test_file.tif", "/path/to/second/file.qptiff"],
-        'file_names': ["test_file.tif", "file.qptiff"]
+        'file_names': ["test_file.tif", "file.qptiff"],
+        'ImportOptions': {
+            'schema': 1,
+            'platePixelSource': 'label',
+            'plateLabelName': 'nuclei',
+        },
     }
     
     stage = STAGE_IMPORTED
@@ -81,6 +86,7 @@ def test_log_ingestion_step(setup_database):
         assert result.stage == stage
         assert result.uuid == order_info['UUID']
         assert json.loads(result.files) == order_info['Files']
+        assert json.loads(result.import_options) == order_info['ImportOptions']
         
     # Close the engine explicitly to release resources
     engine.dispose()

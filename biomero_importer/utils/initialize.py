@@ -140,7 +140,8 @@ def finalize_dangling_orders_and_get_last_id(ingest_tracker, IngestionTracking, 
                     destination_id=original_order.destination_id,
                     destination_type=original_order.destination_type,
                     files=original_order.files,
-                    file_names=original_order.file_names
+                    file_names=original_order.file_names,
+                    import_options=original_order.import_options,
                     # Include additional fields if necessary
                 )
                 session.add(new_failed_entry)

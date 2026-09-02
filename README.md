@@ -38,6 +38,8 @@ The system uses two main tables:
 - Stores all import orders and their progress
 - Tracks stages: "Import Pending" → "Import Started" → "Import Completed"/"Import Failed"
 - Includes full metadata: user, group, destination, files, timestamps
+- Stores optional Zarr registration choices in the nullable `import_options`
+  JSON text column. Existing orders without it behave exactly as before.
 
 ### `imports_preprocessing` 
 - Stores preprocessing configuration for containerized workflows
@@ -92,10 +94,21 @@ The system uses these environment variables:
 - `OMERO_PORT`: OMERO server port
 - `PODMAN_USERNS_MODE`: Set to "keep-id" for Linux user namespace mapping in preprocessing
 - `USE_REGISTER_ZARR`: Set to "true" to enable zarr register script - requires omero-zarr-pixel-buffer (overrides config file setting)
+- `BIOMERO_SHALLOW_ZARR`: Opt in to the native `biomero.shallow-zarr`
+  lifecycle operation. Existing orders are unchanged when false or absent.
+  Enabling it requires installing the importer with its identity extra:
+  `pip install "biomero-importer[identity]"`. The NL-BIOMERO importer image
+  includes this extra. If the flag is enabled without ISCC-BIO,
+  `get_importer_capabilities()` omits the lifecycle operation, reports the
+  missing dependency, and rejects shallow import orders with an actionable
+  configuration error; ordinary import orders remain available.
+- `BIOMERO_SHALLOW_ZARR_WORKERS`: Bounded ISCC-BIO identity workers used by
+  the importer service (library fallback `1`; NL-BIOMERO supplies `4`). This is
+  deployment configuration, not a client-controlled import option.
 
 ## Creating Upload Orders
 
-Upload orders are typically created through a user interface, such as the OMERO.biomero plugin (Importer tab) at `/omero_biomero/biomero/`, an OMERO.web extension. However, orders can also be created programmatically using the database API. 
+Upload orders are typically created through a user interface, such as the OMERO.biomero plugin (Importer tab) at `/omero_biomero/biomero/`, an OMERO.web extension. However, orders can also be created programmatically. New integrations should call `biomero_importer.submit_import_order(order)` and inspect `biomero_importer.get_importer_capabilities()` before requesting an optional lifecycle operation. The API validates and writes the same append-only database order used by existing clients; direct legacy database writers remain supported.
 
 You can use the provided test scripts shown below as examples. 
 You can also configure some more settings for them: 
@@ -108,6 +121,43 @@ sample_user: "researcher"
 sample_parent_id: "151"
 sample_parent_type: "Dataset"  # or "Screen"
 ```
+
+### BIOMERO shallow Plate registration
+
+Native importer lifecycle operations are carried in the versioned
+`ImportOptionsEnvelope` from `biomero-schema`. They execute after any existing
+container preprocessing and before OMERO registration. This means a direct
+Zarr or a Zarr produced by the existing converter can request the same
+post-processing behavior. The lifecycle engine returns a registration plan and
+does not depend on `register.py`; a future OMERO CLI Zarr importer can consume
+the same plan.
+
+Empty options and the earlier flat schema-1 registration options are upcast to
+an envelope with no operations, so they continue through the established
+import path. `imports_preprocessing` remains the legacy external-container
+contract and is not repurposed for native operations.
+
+BIOMERO workflow result orders may include an `ImportOptions` object defined by
+`biomero-schema`. For a managed shallow Plate, the default
+`{"platePixelSource":"source"}` keeps the Plate/Well/WellSample hierarchy and
+registers each child Image against the managed canonical Plate pixels. The
+optional `{"platePixelSource":"label","plateLabelName":"nuclei"}` registers
+the same hierarchy against that label under every image node, producing a
+mask-backed Plate view without copying arrays. BIOMERO creates these orders;
+ordinary importer clients can omit `ImportOptions`.
+
+BIOMERO-generated workflow inputs may carry `.biomero-input.json`, containing
+one serialized `CanonicalInput`. The importer accepts it only when it exactly
+matches the authoritative `CanonicalInputManifest` in the lifecycle operation,
+then independently verifies the returned pixels. This disambiguates renamed
+outputs derived from separately selected Images with identical content. The
+temporary marker is consumed before registration; missing markers retain the
+existing artifact-name and content-identity fallback.
+
+The shallow collection remains the authoritative in-place result and receives
+a compact Plate-level OMERO annotation. Label-backed registration requires the
+named label to exist on every Plate image and fails rather than guessing when
+the selection is incomplete or ambiguous.
 
 ### Using the System Check Script
 
@@ -673,5 +723,3 @@ py -3.12 -m venv .venv
 ## LICENSE
 
 License changed to GPL-2.0 (starting version 1.3), as this work depends on `omero-py` and `ezomero` libraries for the OMERO import and session management.
-
-

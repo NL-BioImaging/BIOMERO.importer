@@ -126,6 +126,7 @@ class IngestionTracking(Base):
     timestamp = Column(DateTime(timezone=True), default=func.now())
     _files = Column("files", Text, nullable=False)
     _file_names = Column("file_names", Text, nullable=True)
+    _import_options = Column("import_options", Text, nullable=True)
     # Optional human-readable description for the step (e.g., failure reason)
     description = Column(Text, nullable=True)
 
@@ -148,6 +149,16 @@ class IngestionTracking(Base):
     @file_names.setter
     def file_names(self, file_names):
         self._file_names = json.dumps(file_names)
+
+    @property
+    def import_options(self):
+        return json.loads(self._import_options) if self._import_options else {}
+
+    @import_options.setter
+    def import_options(self, import_options):
+        self._import_options = (
+            json.dumps(import_options) if import_options else None
+        )
 
 
 # Define the index outside of the class
@@ -267,6 +278,7 @@ class IngestTracker:
                         uuid=str(order_info.get('UUID', 'Unknown')),
                         files=order_info.get('Files', []),
                         file_names=order_info.get('FileNames', []),
+                        import_options=order_info.get('ImportOptions', {}),
                         description=(
                             order_info.get('Description')
                             or order_info.get('description')

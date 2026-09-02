@@ -30,6 +30,9 @@ PODMAN_RUN_MAX_ATTEMPTS = 3  # Bounded retries for transient bind setup failures
 PODMAN_RUN_RETRY_DELAY = 2  # Initial retry delay, doubled after each failure
 TMP_OUTPUT_FOLDER = "OMERO_inplace"
 PROCESSED_DATA_FOLDER = ".processed"
+SHALLOW_ZARR_ENABLED = (
+    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
+)
 
 # A CIFS/DFS referral reconnect can make Podman's first bind-source statfs fail
 # even though the same mount succeeds immediately afterward. Keep this exact so
@@ -609,10 +612,52 @@ class DataPackageImporter:
         import zarr
         from types import SimpleNamespace
 
+        logical_uri = str(uri)
         file_title = _zarr_import_title(uri)
-        args = SimpleNamespace(uri=uri, endpoint=endpoint, name=file_title,
-                               nosignrequest=nosignrequest, target=str(target), target_by_name=target_by_name)
+        shallow_registration = None
+        import_options = None
+        if SHALLOW_ZARR_ENABLED:
+            from biomero_schema.imports import parse_import_options
+            from .result_zarr import resolve_shallow_registration
 
+            import_options = parse_import_options(
+                self.data_package.get("ImportOptions", {})
+            ).registration
+            shallow_registration = resolve_shallow_registration(
+                logical_uri,
+                import_options=import_options,
+            )
+            if shallow_registration is not None:
+                uri = str(shallow_registration.registration_path)
+                if shallow_registration.plate_label_name is not None:
+                    file_title = (
+                        f"{file_title} "
+                        f"[{shallow_registration.plate_label_name}]"
+                    )
+                self.logger.info(
+                    "Resolved %s shallow Zarr registration %s to pixel backing %s",
+                    shallow_registration.kind,
+                    logical_uri,
+                    uri,
+                )
+
+        args = SimpleNamespace(
+            uri=uri,
+            endpoint=endpoint,
+            name=file_title,
+            nosignrequest=nosignrequest,
+            target=str(target),
+            target_by_name=target_by_name,
+            plate_label_paths=(
+                dict(shallow_registration.plate_label_paths)
+                if shallow_registration is not None else {}
+            ),
+            plate_label_name=(
+                shallow_registration.plate_label_name
+                if shallow_registration is not None else None
+            ),
+        )
+        
         # --- start copy from register.main() ---
 
         validate_endpoint(endpoint)
@@ -685,16 +730,39 @@ class DataPackageImporter:
             for obj in objs:
                 link_to_target(args, conn, obj)
 
+        if shallow_registration is not None:
+            from biomero_schema.zarr import SHALLOW_COLLECTION_NAMESPACE
+
+            object_type = "Plate" if "plate" in zattrs else "Image"
+            for obj in objs:
+                object_id = obj.getId().getValue()
+                ezomero.post_map_annotation(
+                    conn=conn,
+                    object_type=object_type,
+                    object_id=object_id,
+                    kv_dict=(
+                        shallow_registration.reference.to_annotation_values()
+                    ),
+                    ns=SHALLOW_COLLECTION_NAMESPACE,
+                    across_groups=False,
+                )
+                self.logger.info(
+                    "Attached shallow collection reference to %s %s: %s",
+                    object_type,
+                    object_id,
+                    shallow_registration.collection_root,
+                )
+
         # --- end copy from register.main() ---
 
         image_ids = [obj.getId().getValue() for obj in objs]
         is_plate = "plate" in zattrs
         if image_ids:
             self.imported = True
-            self.logger.info(f'Import successfully for {uri}')
+            self.logger.info(f'Import successfully for {logical_uri}')
         else:
             self.imported = False
-            self.logger.error(f'Import failed for {uri}')
+            self.logger.error(f'Import failed for {logical_uri}')
         return image_ids, is_plate
 
     @connection
@@ -1026,6 +1094,41 @@ class DataPackageImporter:
                     (file_path, upload_target, os.path.basename(file_path), None))
         return successful_uploads, failed_uploads
 
+    def upload_prepared_plan(
+        self,
+        conn,
+        plan,
+        *,
+        dataset_id=None,
+        screen_id=None,
+    ):
+        """Import lifecycle-planned views through the existing upload path."""
+        successful = []
+        failed = []
+        original_options = self.data_package.get("ImportOptions")
+        try:
+            for item in plan.items:
+                self.logger.info(
+                    "Importing prepared %s view from %s",
+                    item.role,
+                    item.path,
+                )
+                self.data_package["ImportOptions"] = item.registration.to_dict()
+                item_successful, item_failed = self.upload_files(
+                    conn,
+                    [str(item.path)],
+                    dataset_id=dataset_id,
+                    screen_id=screen_id,
+                )
+                successful.extend(item_successful)
+                failed.extend(item_failed)
+        finally:
+            if original_options is None:
+                self.data_package.pop("ImportOptions", None)
+            else:
+                self.data_package["ImportOptions"] = original_options
+        return successful, failed
+
     @connection
     def rename_image_if_needed(self, conn, image_id, local_path):
         """Rename Image to the full name specified by the preprocessor container.
@@ -1223,6 +1326,7 @@ class DataPackageImporter:
 
                             processor = DataProcessor(
                                 self.data_package, self.logger)
+                            lifecycle_plan = None
                             if processor.has_preprocessing():
                                 # Setup a local tmp folder on the OMERO server itself
                                 local_tmp_folder = get_tmp_output_path(
@@ -1258,8 +1362,37 @@ class DataPackageImporter:
 
                                 # Results already persisted by processor.run() under PREPROC_* keys
 
+                                from biomero_schema.imports import parse_import_options
+                                options = parse_import_options(
+                                    self.data_package.get("ImportOptions")
+                                )
+                                if options.operations:
+                                    from .lifecycle import ImportLifecycleEngine
+
+                                    lifecycle_files = [
+                                        result.get(PREPROC_RESULT_LOCAL_FULL)
+                                        for result in self.data_package.get(
+                                            PREPROC_RESULTS_KEY, []
+                                        )
+                                        if result.get(PREPROC_RESULT_LOCAL_FULL)
+                                    ]
+                                    if not lifecycle_files:
+                                        lifecycle_files = local_paths
+                                    lifecycle_plan = ImportLifecycleEngine(
+                                        self.logger
+                                    ).prepare(lifecycle_files, options)
+
                                 # Pass the target id based on its type; include local paths if preprocessed
-                                if is_screen:
+                                if lifecycle_plan is not None:
+                                    successful_uploads, failed_uploads = (
+                                        self.upload_prepared_plan(
+                                            user_conn,
+                                            lifecycle_plan,
+                                            dataset_id=(None if is_screen else target_id),
+                                            screen_id=(target_id if is_screen else None),
+                                        )
+                                    )
+                                elif is_screen:
                                     successful_uploads, failed_uploads = self.upload_files(
                                         user_conn, file_paths, dataset_id=None, screen_id=target_id, local_paths=local_paths
                                     )
@@ -1270,7 +1403,29 @@ class DataPackageImporter:
                             else:
                                 self.logger.info(
                                     "No preprocessing required; continuing upload.")
-                                if is_screen:
+                                from biomero_schema.imports import parse_import_options
+                                options = parse_import_options(
+                                    self.data_package.get("ImportOptions")
+                                )
+                                if options.operations:
+                                    from .lifecycle import ImportLifecycleEngine
+
+                                    log_ingestion_step(
+                                        self.data_package,
+                                        STAGE_PREPROCESSING,
+                                    )
+                                    lifecycle_plan = ImportLifecycleEngine(
+                                        self.logger
+                                    ).prepare(file_paths, options)
+                                    successful_uploads, failed_uploads = (
+                                        self.upload_prepared_plan(
+                                            user_conn,
+                                            lifecycle_plan,
+                                            dataset_id=(None if is_screen else target_id),
+                                            screen_id=(target_id if is_screen else None),
+                                        )
+                                    )
+                                elif is_screen:
                                     successful_uploads, failed_uploads = self.upload_files(
                                         user_conn,
                                         file_paths,
