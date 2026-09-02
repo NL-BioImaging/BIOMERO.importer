@@ -96,6 +96,12 @@ The system uses these environment variables:
 - `USE_REGISTER_ZARR`: Set to "true" to enable zarr register script - requires omero-zarr-pixel-buffer (overrides config file setting)
 - `BIOMERO_SHALLOW_ZARR`: Opt in to the native `biomero.shallow-zarr`
   lifecycle operation. Existing orders are unchanged when false or absent.
+  Enabling it requires installing the importer with its identity extra:
+  `pip install "biomero-importer[identity]"`. The NL-BIOMERO importer image
+  includes this extra. If the flag is enabled without ISCC-BIO,
+  `get_importer_capabilities()` omits the lifecycle operation, reports the
+  missing dependency, and rejects shallow import orders with an actionable
+  configuration error; ordinary import orders remain available.
 - `BIOMERO_SHALLOW_ZARR_WORKERS`: Bounded ISCC-BIO identity workers used by
   the importer service (library fallback `1`; NL-BIOMERO supplies `4`). This is
   deployment configuration, not a client-controlled import option.

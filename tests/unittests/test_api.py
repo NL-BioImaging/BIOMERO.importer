@@ -44,8 +44,26 @@ def test_capability_is_opt_in(monkeypatch):
     assert get_importer_capabilities()["lifecycleOperations"] == []
 
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.api._identity_dependency_available", lambda: True
+    )
     assert get_importer_capabilities()["lifecycleOperations"] == [
         "biomero.shallow-zarr"
+    ]
+
+
+def test_capability_reports_missing_identity_extra(monkeypatch):
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.api._identity_dependency_available", lambda: False
+    )
+
+    capabilities = get_importer_capabilities()
+
+    assert capabilities["lifecycleOperations"] == []
+    assert capabilities["isccBioIdentity"] is False
+    assert capabilities["configurationErrors"] == [
+        "BIOMERO_SHALLOW_ZARR requires the biomero-importer identity extra"
     ]
 
 
@@ -76,6 +94,9 @@ def test_operation_order_requires_capability(monkeypatch):
 
 def test_operation_order_is_normalized_and_submitted(monkeypatch):
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.api._identity_dependency_available", lambda: True
+    )
     events = []
     order = _order(ImportOptionsEnvelope(
         operations=(_operation(),)
@@ -90,3 +111,19 @@ def test_operation_order_is_normalized_and_submitted(monkeypatch):
     assert events[0][0]["ImportOptions"]["operations"][0]["kind"] == (
         "biomero.shallow-zarr"
     )
+
+
+def test_operation_order_reports_missing_identity_extra(monkeypatch):
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.api._identity_dependency_available", lambda: False
+    )
+    order = _order(ImportOptionsEnvelope(
+        operations=(_operation(),)
+    ).to_dict())
+
+    with pytest.raises(
+        UnsupportedImportOperation,
+        match=r"install biomero-importer\[identity\]",
+    ):
+        submit_import_order(order, log_order=lambda *_: None)

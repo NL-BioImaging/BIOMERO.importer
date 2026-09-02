@@ -1,6 +1,7 @@
 """Stable client-facing API for BIOMERO.importer upload orders."""
 
 from copy import deepcopy
+from importlib.util import find_spec
 from typing import Any, Mapping
 
 from biomero_schema.imports import (
@@ -25,17 +26,33 @@ def _flag_enabled(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() == "true"
 
 
+def _identity_dependency_available() -> bool:
+    try:
+        return find_spec("iscc_bio.api") is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
 def get_importer_capabilities() -> dict[str, Any]:
     """Return capabilities without requiring a running importer process."""
 
     operations = []
-    if _flag_enabled("BIOMERO_SHALLOW_ZARR"):
+    configuration_errors = []
+    identity_available = _identity_dependency_available()
+    shallow_enabled = _flag_enabled("BIOMERO_SHALLOW_ZARR")
+    if shallow_enabled and identity_available:
         operations.append(SHALLOW_ZARR_OPERATION)
+    elif shallow_enabled:
+        configuration_errors.append(
+            "BIOMERO_SHALLOW_ZARR requires the biomero-importer identity extra"
+        )
     return {
         "schema": IMPORTER_API_SCHEMA,
         "importOptionsSchemas": [1, 2],
         "lifecycleOperations": operations,
         "externalPreprocessing": True,
+        "isccBioIdentity": identity_available,
+        "configurationErrors": configuration_errors,
     }
 
 
@@ -80,6 +97,18 @@ def submit_import_order(
         requested = ", ".join(
             operation.kind for operation in envelope.operations
         )
+        if (
+            _flag_enabled("BIOMERO_SHALLOW_ZARR")
+            and any(
+                operation.kind == SHALLOW_ZARR_OPERATION
+                for operation in envelope.operations
+            )
+            and not _identity_dependency_available()
+        ):
+            raise UnsupportedImportOperation(
+                "biomero.shallow-zarr requires ISCC-BIO; install "
+                "biomero-importer[identity]"
+            )
         raise UnsupportedImportOperation(
             f"Importer does not support requested operation(s): {requested}"
         )
