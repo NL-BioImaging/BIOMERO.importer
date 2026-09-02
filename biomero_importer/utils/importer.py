@@ -64,6 +64,12 @@ PREPROC_RESULT_LOCAL_FULL = "local_full_path"
 PREPROC_RESULT_METADATA = "metadata"
 
 
+def _zarr_import_title(uri):
+    """Derive an OMERO object name from a Zarr URI."""
+    file_title = os.path.splitext(os.path.basename(uri))[0]
+    return file_title.removesuffix('.ome')
+
+
 def get_tmp_output_path(data_package):
     """
     Helper function to generate the temporary output folder path.
@@ -607,7 +613,7 @@ class DataPackageImporter:
         from types import SimpleNamespace
 
         logical_uri = str(uri)
-        file_title = os.path.splitext(os.path.basename(logical_uri))[0].rstrip('.ome')
+        file_title = _zarr_import_title(uri)
         shallow_registration = None
         import_options = None
         if SHALLOW_ZARR_ENABLED:
@@ -651,7 +657,7 @@ class DataPackageImporter:
                 if shallow_registration is not None else None
             ),
         )
-
+        
         # --- start copy from register.main() ---
 
         validate_endpoint(endpoint)
