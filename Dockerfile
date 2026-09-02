@@ -1,8 +1,6 @@
 # Start from the Miniconda base image to use Conda
 FROM continuumio/miniconda3:25.3.1-1
 
-ARG BIOMERO_SCHEMA_BRANCH=feature/zarr-shallow-storage
-
 # Set the working directory in the container
 WORKDIR /auto-importer
 
@@ -29,12 +27,6 @@ RUN apt-get update && apt-get install -y \
     fuse-overlayfs \
     podman \
     unzip
-
-# Install the shared cross-service contracts from the matching feature branch.
-# The branch-head response invalidates this layer whenever the branch advances.
-ADD "https://api.github.com/repos/NL-BioImaging/biomero-schema/commits/${BIOMERO_SCHEMA_BRANCH}" /latest_commit_biomero_schema
-RUN pip install \
-    "biomero-schema @ git+https://github.com/NL-BioImaging/biomero-schema.git@${BIOMERO_SCHEMA_BRANCH}"
 
 # Create a group and user with specified GID and UID
 RUN groupadd -g 1000 autoimportgroup && \
