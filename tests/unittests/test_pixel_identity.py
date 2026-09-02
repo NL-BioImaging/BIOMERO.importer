@@ -24,6 +24,14 @@ def biocode_result(code="ISCC:KSUM", data="ISCC:GDATA", instance="ISCC:IINSTANCE
     return {"iscc_code": code, "units": [data, instance]}
 
 
+def biocode_response(parts=None):
+    return {
+        "iscc_code": "ISCC:KTOPLEVEL",
+        "generator": "iscc-bio - v0.2.0",
+        "parts": [biocode_result()] if parts is None else parts,
+    }
+
+
 def write_json(path, value):
     import json
 
@@ -129,11 +137,11 @@ def test_builds_identity_from_public_iscc_bio_api(tmp_path):
 
     def generate(source, *, source_type):
         calls.append((source, source_type))
-        return [biocode_result()]
+        return biocode_response()
 
     provider = IsccBioIdentityProvider(
         generate_biocode=generate,
-        tool_version="0.1.0",
+        tool_version="0.2.0",
     )
 
     identity = provider.generate(
@@ -150,10 +158,8 @@ def test_builds_identity_from_public_iscc_bio_api(tmp_path):
     assert identity.iscc_code == "ISCC:KSUM"
     assert identity.data_code == "ISCC:GDATA"
     assert identity.instance_code == "ISCC:IINSTANCE"
-    assert identity.tool_version == "0.1.0"
-    assert identity.imagewalk_revision == (
-        "iscc-bio/0.1.0@c536d7699b7d25592bfe5c91c947b749344b6914"
-    )
+    assert identity.tool_version == "0.2.0"
+    assert identity.imagewalk_revision == "iscc-bio - v0.2.0"
     assert identity.node_path == "."
     assert identity.shape == (1, 2, 3, 16, 32)
 
@@ -213,9 +219,9 @@ def test_targets_an_explicit_nested_zarr_node(tmp_path, monkeypatch):
     calls = []
     provider = IsccBioIdentityProvider(
         generate_biocode=lambda source, *, source_type: (
-            calls.append((source, source_type)) or [biocode_result()]
+            calls.append((source, source_type)) or biocode_response()
         ),
-        tool_version="0.1.0",
+        tool_version="0.2.0",
     )
     aliases = []
 
@@ -248,11 +254,11 @@ def test_builds_omero_identity_through_same_public_api():
 
     def generate(*args, **kwargs):
         calls.append((args, kwargs))
-        return [biocode_result()]
+        return biocode_response()
 
     provider = IsccBioIdentityProvider(
         generate_biocode=generate,
-        tool_version="0.1.0",
+        tool_version="0.2.0",
     )
 
     identity = provider.generate_omero(
@@ -273,8 +279,8 @@ def test_builds_omero_identity_through_same_public_api():
 
 def test_omero_identity_rejects_invalid_image_id():
     provider = IsccBioIdentityProvider(
-        generate_biocode=lambda *args, **kwargs: [biocode_result()],
-        tool_version="0.1.0",
+        generate_biocode=lambda *args, **kwargs: biocode_response(),
+        tool_version="0.2.0",
     )
 
     with pytest.raises(PixelIdentityError, match="positive"):
@@ -292,8 +298,8 @@ def test_omero_identity_rejects_invalid_image_id():
 @pytest.mark.parametrize("node_path", ["../escape", "/absolute", r"A\1\0"])
 def test_rejects_unsafe_node_path(tmp_path, node_path):
     provider = IsccBioIdentityProvider(
-        generate_biocode=lambda *args, **kwargs: [biocode_result()],
-        tool_version="0.1.0",
+        generate_biocode=lambda *args, **kwargs: biocode_response(),
+        tool_version="0.2.0",
     )
 
     with pytest.raises(PixelIdentityError, match="node path"):
@@ -313,8 +319,10 @@ def test_rejects_missing_or_ambiguous_scene(tmp_path):
 
     for results in ([], [biocode_result(), biocode_result(code="ISCC:KOTHER")]):
         provider = IsccBioIdentityProvider(
-            generate_biocode=lambda *args, _results=results, **kwargs: _results,
-            tool_version="0.1.0",
+            generate_biocode=lambda *args, _results=results, **kwargs: (
+                biocode_response(_results)
+            ),
+            tool_version="0.2.0",
         )
         with pytest.raises(PixelIdentityError, match="exactly one scene"):
             provider.generate(
@@ -331,10 +339,10 @@ def test_rejects_unexpected_upstream_result(tmp_path):
     zarr = tmp_path / "input.ome.zarr"
     zarr.mkdir()
     provider = IsccBioIdentityProvider(
-        generate_biocode=lambda *args, **kwargs: [
-            {"iscc_code": "ISCC:KSUM", "units": ["ISCC:GDATA"]}
-        ],
-        tool_version="0.1.0",
+        generate_biocode=lambda *args, **kwargs: biocode_response(
+            [{"iscc_code": "ISCC:KSUM", "units": ["ISCC:GDATA"]}]
+        ),
+        tool_version="0.2.0",
     )
 
     with pytest.raises(PixelIdentityError, match="Data and Instance"):
@@ -352,8 +360,8 @@ def test_exact_match_requires_instance_code_and_semantic_guard(tmp_path):
     zarr = tmp_path / "input.ome.zarr"
     zarr.mkdir()
     provider = IsccBioIdentityProvider(
-        generate_biocode=lambda *args, **kwargs: [biocode_result()],
-        tool_version="0.1.0",
+        generate_biocode=lambda *args, **kwargs: biocode_response(),
+        tool_version="0.2.0",
     )
     first = provider.generate(
         zarr,

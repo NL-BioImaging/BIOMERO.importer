@@ -18,8 +18,7 @@ from biomero_schema.zarr import PixelIdentity
 import numpy as np
 
 
-BiocodeCallable = Callable[..., Sequence[Mapping[str, Any]]]
-ISCC_BIO_GIT_REVISION = "c536d7699b7d25592bfe5c91c947b749344b6914"
+BiocodeCallable = Callable[..., Mapping[str, Any]]
 
 
 class PixelIdentityError(RuntimeError):
@@ -194,12 +193,10 @@ class IsccBioIdentityProvider:
 
         generate, tool_version = self._load_upstream()
         # Use iscc-bio's BioIO IMAGEWALK implementation for explicit image
-        # nodes.  iscc-bio 0.1.0's direct NGFF reader mistakes the numeric
-        # pyramid arrays of a normal multiscale image for bioformats2raw
-        # series. BioIO follows the same upstream IMAGEWALK contract without
-        # duplicating hashing or traversal here.
+        # nodes. BioIO addresses one image group directly and avoids treating
+        # numeric multiscale arrays as separate bioformats2raw series.
         if target.name.lower().endswith(".zarr"):
-            results = list(generate(target, source_type="bioio"))
+            result = generate(target, source_type="bioio")
         else:
             # BioIO selects its reader from the path suffix. NGFF Plate image
             # nodes and ordinary label nodes are valid standalone image groups
@@ -218,9 +215,9 @@ class IsccBioIdentityProvider:
                         "Cannot create the temporary NGFF node alias required "
                         "for ISCC-BIO"
                     ) from exc
-                results = list(generate(alias, source_type="bioio"))
+                result = generate(alias, source_type="bioio")
         return self._build_identity(
-            results,
+            result,
             source_description="An explicit Zarr node",
             tool_version=tool_version,
             node_path=node_path,
@@ -248,9 +245,9 @@ class IsccBioIdentityProvider:
         if not isinstance(image_id, int) or isinstance(image_id, bool) or image_id < 1:
             raise PixelIdentityError("OMERO image ID must be a positive integer")
         generate, tool_version = self._load_upstream()
-        results = list(generate(conn=connection, iid=image_id))
+        result = generate(conn=connection, iid=image_id)
         return self._build_identity(
-            results,
+            result,
             source_description=f"OMERO Image {image_id}",
             tool_version=tool_version,
             node_path=node_path,
@@ -263,7 +260,7 @@ class IsccBioIdentityProvider:
 
     def _build_identity(
         self,
-        results: Sequence[Mapping[str, Any]],
+        response: Mapping[str, Any],
         *,
         source_description: str,
         tool_version: str,
@@ -275,13 +272,18 @@ class IsccBioIdentityProvider:
         coordinate_transformations: Sequence[Mapping[str, Any]],
     ) -> PixelIdentity:
         """Validate one public API result and produce the shared contract."""
-        if len(results) != 1:
+        parts = response.get("parts")
+        if not isinstance(parts, Sequence) or isinstance(parts, (str, bytes)):
+            raise PixelIdentityError("iscc-bio must return an ordered parts list")
+        if len(parts) != 1:
             raise PixelIdentityError(
                 f"{source_description} must produce exactly one scene; "
-                f"iscc-bio returned {len(results)}"
+                f"iscc-bio returned {len(parts)}"
             )
 
-        result = results[0]
+        result = parts[0]
+        if not isinstance(result, Mapping):
+            raise PixelIdentityError("iscc-bio returned an invalid image part")
         units = result.get("units")
         if not isinstance(units, Sequence) or isinstance(units, (str, bytes)):
             units = ()
@@ -300,7 +302,10 @@ class IsccBioIdentityProvider:
                 tool_version=tool_version,
                 imagewalk_revision=(
                     self._imagewalk_revision
-                    or f"iscc-bio/{tool_version}@{ISCC_BIO_GIT_REVISION}"
+                    or str(
+                        response.get("generator")
+                        or f"iscc-bio/{tool_version}"
+                    )
                 ),
                 shape=tuple(shape),
                 dtype=dtype,
@@ -334,7 +339,6 @@ def pixel_identities_match(left: PixelIdentity, right: PixelIdentity) -> bool:
 
 __all__ = [
     "IsccBioIdentityProvider",
-    "ISCC_BIO_GIT_REVISION",
     "PixelIdentityError",
     "ZarrNodeSemanticGuard",
     "pixel_identities_match",
