@@ -38,8 +38,10 @@ def get_importer_capabilities() -> dict[str, Any]:
 
     operations = []
     configuration_errors = []
-    identity_available = _identity_dependency_available()
     shallow_enabled = _flag_enabled("BIOMERO_SHALLOW_ZARR")
+    identity_available = (
+        _identity_dependency_available() if shallow_enabled else False
+    )
     if shallow_enabled and identity_available:
         operations.append(SHALLOW_ZARR_OPERATION)
     elif shallow_enabled:

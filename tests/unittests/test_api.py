@@ -41,6 +41,10 @@ def _operation():
 
 def test_capability_is_opt_in(monkeypatch):
     monkeypatch.delenv("BIOMERO_SHALLOW_ZARR", raising=False)
+    monkeypatch.setattr(
+        "biomero_importer.api._identity_dependency_available",
+        lambda: pytest.fail("identity dependency inspected while disabled"),
+    )
     assert get_importer_capabilities()["lifecycleOperations"] == []
 
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
