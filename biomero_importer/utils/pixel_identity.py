@@ -187,11 +187,11 @@ class IsccBioIdentityProvider:
     ) -> PixelIdentity:
         """Hash exactly one Zarr image node and attach its semantic guard."""
         parsed_node = _validate_node_path(node_path)
-        target = Path(zarr_root)
-        if node_path != ".":
-            target = target.joinpath(*parsed_node.parts)
-
         generate, tool_version = self._load_upstream()
+        target = Path(zarr_root).resolve(strict=True)
+        if node_path != ".":
+            target = target.joinpath(*parsed_node.parts).resolve(strict=True)
+
         # Use iscc-bio's BioIO IMAGEWALK implementation for explicit image
         # nodes. BioIO addresses one image group directly and avoids treating
         # numeric multiscale arrays as separate bioformats2raw series.
