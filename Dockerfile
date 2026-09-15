@@ -108,12 +108,12 @@ ENV _CONTAINERS_USERNS_CONFIGURED="" \
 # Copy the application code (when building from the repository context)
 COPY . /auto-importer
 
-# Install the package - use git version if available, otherwise use fallback version
+# Scope the fallback version to the importer so Git dependencies keep their versions.
 RUN if [ -d "/auto-importer/.git" ]; then \
         git config --global --add safe.directory /auto-importer && \
         pip install '/auto-importer[identity]'; \
     else \
-        SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install '/auto-importer[identity]'; \
+        SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BIOMERO_IMPORTER=0.0.0 pip install '/auto-importer[identity]'; \
     fi
 
 # Make the logs directory
