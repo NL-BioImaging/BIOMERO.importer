@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y \
 # Development-only dependency wiring for remote shallow-Zarr testing. The
 # branch-head requests invalidate this layer whenever either source advances.
 ARG BIOMERO_SCHEMA_BRANCH=feature/remote-shallower
-ARG BIOMERO_SHALLOWER_BRANCH=main
+ARG BIOMERO_SHALLOWER_BRANCH=feature/remote-shallower
 ADD "https://api.github.com/repos/NL-BioImaging/biomero-schema/commits/${BIOMERO_SCHEMA_BRANCH}" /latest_commit_biomero_schema
 ADD "https://api.github.com/repos/NL-BioImaging/BIOMERO.shallower/commits/${BIOMERO_SHALLOWER_BRANCH}" /latest_commit_biomero_shallower
 RUN pip install \

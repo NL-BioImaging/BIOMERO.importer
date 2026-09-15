@@ -32,7 +32,7 @@ dependencies = [
     "zarr>=3",
     "alembic>=1.13",
     "biomero-schema @ git+https://github.com/NL-BioImaging/biomero-schema.git@feature/remote-shallower",
-    "biomero-shallower @ git+https://github.com/NL-BioImaging/BIOMERO.shallower.git@main"
+    "biomero-shallower @ git+https://github.com/NL-BioImaging/BIOMERO.shallower.git@feature/remote-shallower"
 ]
 
 [project.optional-dependencies]
