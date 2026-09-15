@@ -1,11 +1,13 @@
 """Compatibility adapter; filesystem identity lives in biomero-shallower."""
-from typing import Any, Literal, Sequence, Mapping
+from typing import Any, Literal, Mapping, Sequence
 from importlib import import_module
+
 from biomero_schema.zarr import PixelIdentity
 from biomero_shallower.pixel_identity import *  # noqa: F401,F403
 from biomero_shallower.pixel_identity import (
     IsccBioIdentityProvider as FilesystemIdentityProvider,
-    _validate_node_path, os,
+    _validate_node_path,
+    os,
 )
 
 
@@ -29,7 +31,11 @@ class IsccBioIdentityProvider(FilesystemIdentityProvider):
     ) -> PixelIdentity:
         """Hash one OMERO Image through the upstream Blitz IMAGEWALK reader."""
         _validate_node_path(node_path)
-        if not isinstance(image_id, int) or isinstance(image_id, bool) or image_id < 1:
+        if (
+            not isinstance(image_id, int)
+            or isinstance(image_id, bool)
+            or image_id < 1
+        ):
             raise PixelIdentityError("OMERO image ID must be a positive integer")
         generate, tool_version = self._load_upstream()
         result = generate(conn=connection, iid=image_id)
