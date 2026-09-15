@@ -31,8 +31,8 @@ dependencies = [
     "psycopg2>=2.9.7",
     "zarr>=3",
     "alembic>=1.13",
-    "biomero-schema>=0.2.1.dev1,<0.3",
-    "biomero-shallower==0.1.0"
+    "biomero-schema @ git+https://github.com/NL-BioImaging/biomero-schema.git@feature/remote-shallower",
+    "biomero-shallower @ git+https://github.com/NL-BioImaging/BIOMERO.shallower.git@main"
 ]
 
 [project.optional-dependencies]
