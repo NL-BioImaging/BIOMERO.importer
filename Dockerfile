@@ -28,6 +28,16 @@ RUN apt-get update && apt-get install -y \
     podman \
     unzip
 
+# Development-only dependency wiring for remote shallow-Zarr testing. The
+# branch-head requests invalidate this layer whenever either source advances.
+ARG BIOMERO_SCHEMA_BRANCH=feature/remote-shallower
+ARG BIOMERO_SHALLOWER_BRANCH=feature/remote-shallower
+ADD "https://api.github.com/repos/NL-BioImaging/biomero-schema/commits/${BIOMERO_SCHEMA_BRANCH}" /latest_commit_biomero_schema
+ADD "https://api.github.com/repos/NL-BioImaging/BIOMERO.shallower/commits/${BIOMERO_SHALLOWER_BRANCH}" /latest_commit_biomero_shallower
+RUN pip install \
+    "biomero-schema @ git+https://github.com/NL-BioImaging/biomero-schema.git@${BIOMERO_SCHEMA_BRANCH}" \
+    "biomero-shallower @ git+https://github.com/NL-BioImaging/BIOMERO.shallower.git@${BIOMERO_SHALLOWER_BRANCH}"
+
 # Create a group and user with specified GID and UID
 RUN groupadd -g 1000 autoimportgroup && \
     useradd -m -r -u 1000 -g autoimportgroup autoimportuser
@@ -98,12 +108,12 @@ ENV _CONTAINERS_USERNS_CONFIGURED="" \
 # Copy the application code (when building from the repository context)
 COPY . /auto-importer
 
-# Install the package - use git version if available, otherwise use fallback version
+# Scope the fallback version to the importer so Git dependencies keep their versions.
 RUN if [ -d "/auto-importer/.git" ]; then \
         git config --global --add safe.directory /auto-importer && \
         pip install '/auto-importer[identity]'; \
     else \
-        SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install '/auto-importer[identity]'; \
+        SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BIOMERO_IMPORTER=0.0.0 pip install '/auto-importer[identity]'; \
     fi
 
 # Make the logs directory

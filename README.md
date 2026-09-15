@@ -176,6 +176,22 @@ docker compose up -d --force-recreate biomero-importer
 
 ## Creating Upload Orders
 
+The optional remote shallower uses the same filesystem library as this local
+path (`biomero-shallower==0.1.0`). Administrator
+`BIOMERO_REMOTE_SHALLOW_ZARR=true` permits consumption of completed receipts
+in the normal shallow lifecycle operation. Configure
+`BIOMERO_RESULT_NORMALIZER_IMAGE` and `BIOMERO_RESULT_NORMALIZER_VERSION`
+identically on the Slurm worker and importer. The default image reference is
+`cellularimagingcf/biomero-shallower:0.1.0`, with package version `0.1.0`.
+Receipts bind the report checksum, canonical input snapshot, image version,
+Slurm job, task, and shallow manifest. Validation does not regenerate pixel
+identities. Source references still resolve through the local managed-storage
+mappings; registration and label-view planning retain their existing semantics.
+Missing enablement, unexpected receipts, and inconsistent committed results
+are rejected. Safely retained full results use the existing local path.
+Install the matching schema receipt contracts (`0.2.1.dev1` initial build or a
+corresponding later release) before installing these feature packages.
+
 Upload orders are typically created through a user interface, such as the OMERO.biomero plugin (Importer tab) at `/omero_biomero/biomero/`, an OMERO.web extension. However, orders can also be created programmatically. New integrations should call `biomero_importer.submit_import_order(order)` and inspect `biomero_importer.get_importer_capabilities()` before requesting an optional lifecycle operation. The API validates and writes the same append-only database order used by existing clients; direct legacy database writers remain supported.
 
 You can use the provided test scripts shown below as examples. 

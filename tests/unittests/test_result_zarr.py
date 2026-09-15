@@ -275,7 +275,8 @@ def test_evaluation_hashes_plate_images_and_labels_concurrently_in_order(
         "A/1/0/labels/cells",
         "B/1/0/labels/cells",
     )
-    assert len(provider.thread_ids) == 2
+    # Image and label phases use separate pools.
+    assert 2 <= len(provider.thread_ids) <= 4
 
 
 def test_evaluation_rejects_invalid_identity_worker_count(tmp_path):
