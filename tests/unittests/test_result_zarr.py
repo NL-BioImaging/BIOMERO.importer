@@ -288,7 +288,7 @@ def test_evaluation_rejects_invalid_identity_worker_count(tmp_path):
         raise AssertionError("invalid identity worker count was accepted")
 
 
-def test_unchanged_plate_without_labels_is_a_passthrough(tmp_path):
+def test_unchanged_plate_without_labels_is_kept_for_registration(tmp_path):
     root = tmp_path / "plate.zarr"
     _make_plate(root)
     provider = NodeIdentityProvider({
@@ -302,8 +302,8 @@ def test_unchanged_plate_without_labels_is_a_passthrough(tmp_path):
         identity_provider=provider,
     )
 
-    assert decision.unchanged_passthrough
-    assert decision.reason == "input-plate-unchanged-no-labels"
+    assert decision.outcome == "eligible"
+    assert decision.reason == "input-plate-unchanged"
     assert len(decision.image_identities) == 2
 
 
@@ -538,7 +538,7 @@ def test_changed_pixels_keep_full_even_when_artifact_matches(tmp_path):
     assert decision.reason == "pixels-changed"
 
 
-def test_unchanged_result_without_labels_is_a_passthrough(tmp_path):
+def test_unchanged_result_without_labels_is_kept_for_registration(tmp_path):
     root = tmp_path / "result.zarr"
     _make_image(root)
     provider = IdentityProvider(_identity())
@@ -549,9 +549,8 @@ def test_unchanged_result_without_labels_is_a_passthrough(tmp_path):
         identity_provider=provider,
     )
 
-    assert not decision.eligible
-    assert decision.unchanged_passthrough
-    assert decision.reason == "input-image-unchanged-no-labels"
+    assert decision.eligible
+    assert decision.reason == "input-image-unchanged"
     assert len(provider.calls) == 1
 
 

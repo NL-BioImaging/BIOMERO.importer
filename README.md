@@ -176,6 +176,12 @@ docker compose up -d --force-recreate biomero-importer
 
 ## Creating Upload Orders
 
+Returned results are not omitted from OMERO merely because their pixels match
+an input. With shallow Zarr enabled, label-free Images and Plates can reference
+canonical pixels while retaining their own result registration and workflow
+metadata. Only duplicate on-disk arrays are removed; canonical inputs are not
+modified. Results whose pixels cannot safely be referenced remain full Zarrs.
+
 The optional remote shallower uses the same filesystem library as this local
 path (`biomero-shallower==0.1.0`). Administrator
 `BIOMERO_REMOTE_SHALLOW_ZARR=true` permits consumption of completed receipts

@@ -150,6 +150,10 @@ def _items_for_shallow_collection(
         raise PixelIdentityError(
             "Shallow collection must contain only Image or only Plate sources"
         )
+    if not any(image.label_node_paths for image in collection.images):
+        return (PreparedImportItem(
+            path=root, registration=ZarrImportOptions(), role="primary",
+        ),)
     if not operation.import_image_label_views:
         return ()
     items = []
@@ -340,8 +344,6 @@ class ImportLifecycleEngine:
                 self.logger.info(
                     "Consumed temporary Zarr input marker for %s", root
                 )
-            if decision.unchanged_passthrough:
-                continue
             if not decision.eligible:
                 write_json(root / '.biomero-import-storage.json', {
                     'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
