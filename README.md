@@ -794,6 +794,20 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python -m alembic -c biomero_importer\migrations\alembic.ini upgrade head
 ```
 
+## Result storage provenance
+
+The shallow-Zarr lifecycle records its actual outcome in
+`.biomero-import-storage.json` beside the result store. Local normalization
+records the executing shallower version; accepted remote receipts also record
+the helper container reference, task/job IDs and report checksum. A fallback
+records full-Zarr storage rather than treating feature enablement as success.
+Reused historical shallow stores without an outcome receipt retain their
+manifest but do not acquire an inferred execution version.
+
+BIOMERO result scripts use this receipt and the shallow manifest to attach a
+compact, per-result storage view to import provenance. Pixel hashing is not
+repeated for this metadata step.
+
 ## LICENSE
 
 License changed to GPL-2.0 (starting version 1.3), as this work depends on `omero-py` and `ezomero` libraries for the OMERO import and session management.

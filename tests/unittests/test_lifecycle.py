@@ -146,6 +146,11 @@ def test_eligible_image_becomes_label_registration_view(tmp_path, monkeypatch):
     ]
     assert plan.decisions == (decision,)
     assert not (root / TRANSFER_INPUT_MARKER).exists()
+    provenance = json.loads((root / '.biomero-import-storage.json').read_text())
+    assert provenance['storage'] == 'shallow-zarr'
+    assert provenance['location'] == 'importer'
+    assert provenance['tool_version']
+    assert provenance['workflow_id'] == str(WORKFLOW_ID)
 
 
 def test_existing_manifest_is_idempotently_reused(tmp_path, monkeypatch):

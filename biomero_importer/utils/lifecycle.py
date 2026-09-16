@@ -23,6 +23,8 @@ from biomero_schema.zarr import (
 from .pixel_identity import PixelIdentityError
 from biomero_schema.shallower import SHALLOW_OPERATION_REPORT, ShallowOperationReport
 from biomero_shallower.operations import validate_report
+from biomero_shallower import __version__ as shallower_version
+from biomero_shallower.transaction import write_json
 from .result_zarr import (
     ReturnedZarrDecision,
     discover_ngff_nodes,
@@ -294,6 +296,13 @@ class ImportLifecycleEngine:
                 if (report.result != "normalized" or report.task_id != receipt.task_id
                         or report.slurm_job_id != receipt.slurm_job_id):
                     raise ValueError("Remote shallow task provenance mismatch")
+                write_json(root / '.biomero-import-storage.json', {
+                    'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
+                    'storage': 'shallow-zarr', 'location': 'remote',
+                    'container': receipt.image, 'tool_version': receipt.tool_version,
+                    'task_id': str(receipt.task_id), 'job_id': receipt.slurm_job_id,
+                    'report_sha256': receipt.report_sha256,
+                })
             elif (root / SHALLOW_OPERATION_REPORT).exists():
                 attempt = ShallowOperationReport.from_dict(json.loads(
                     (root / SHALLOW_OPERATION_REPORT).read_text(encoding="utf-8")))
@@ -334,6 +343,11 @@ class ImportLifecycleEngine:
             if decision.unchanged_passthrough:
                 continue
             if not decision.eligible:
+                write_json(root / '.biomero-import-storage.json', {
+                    'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
+                    'storage': 'full-zarr', 'location': 'importer',
+                    'tool_version': shallower_version, 'reason': decision.reason,
+                })
                 prepared.extend(_full_result_items(
                     root, operation, item.registration
                 ))
@@ -342,6 +356,11 @@ class ImportLifecycleEngine:
                 decision,
                 operation.canonical_inputs.workflow_id,
             )
+            write_json(root / '.biomero-import-storage.json', {
+                'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
+                'storage': 'shallow-zarr', 'location': 'importer',
+                'tool_version': shallower_version,
+            })
             self.logger.info(
                 "Stored shallow Zarr %s with %s image node(s)",
                 root,
