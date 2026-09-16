@@ -16,7 +16,7 @@ def fixture(tmp_path, monkeypatch):
     manifest = _manifest(_input(0))
     monkeypatch.setenv('BIOMERO_SHALLOW_ZARR', 'true')
     monkeypatch.setenv('BIOMERO_REMOTE_SHALLOW_ZARR', 'true')
-    monkeypatch.setenv('BIOMERO_RESULT_NORMALIZER_IMAGE', 'helper:0.1.0')
+    monkeypatch.setenv('BIOMERO_REMOTE_SHALLOWER_IMAGE', 'helper:0.1.0')
     monkeypatch.setenv('SLURM_JOB_ID', '123')
     task_id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
     normalize(root, manifest, identity_provider=IdentityProvider(_identity()),

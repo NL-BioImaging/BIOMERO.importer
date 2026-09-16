@@ -180,7 +180,7 @@ The optional remote shallower uses the same filesystem library as this local
 path (`biomero-shallower==0.1.0`). Administrator
 `BIOMERO_REMOTE_SHALLOW_ZARR=true` permits consumption of completed receipts
 in the normal shallow lifecycle operation. Configure
-`BIOMERO_RESULT_NORMALIZER_IMAGE` and `BIOMERO_RESULT_NORMALIZER_VERSION`
+`BIOMERO_REMOTE_SHALLOWER_IMAGE` and `BIOMERO_REMOTE_SHALLOWER_VERSION`
 identically on the Slurm worker and importer. The default image reference is
 `cellularimagingcf/biomero-shallower:0.1.0`, with package version `0.1.0`.
 Receipts bind the report checksum, canonical input snapshot, image version,

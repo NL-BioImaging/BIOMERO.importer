@@ -281,10 +281,10 @@ class ImportLifecycleEngine:
                     raise ValueError("Remote shallow receipt matches multiple stores")
                 used_receipts.add(receipt.artifact_path)
                 expected_image = os.getenv(
-                    "BIOMERO_RESULT_NORMALIZER_IMAGE",
+                    "BIOMERO_REMOTE_SHALLOWER_IMAGE",
                     "cellularimagingcf/biomero-shallower:0.1.0",
                 )
-                expected_version = os.getenv("BIOMERO_RESULT_NORMALIZER_VERSION", "0.1.0")
+                expected_version = os.getenv("BIOMERO_REMOTE_SHALLOWER_VERSION", "0.1.0")
                 if receipt.image != expected_image or receipt.tool_version != expected_version:
                     raise ValueError("Remote shallow helper differs from administrator configuration")
                 actual = hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
