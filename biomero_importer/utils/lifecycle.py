@@ -253,7 +253,7 @@ class ImportLifecycleEngine:
             "BIOMERO_SHALLOW_ZARR_WORKERS", 1, self.logger
         )
         if operation.remote_receipts and os.getenv(
-            "BIOMERO_REMOTE_SHALLOW_ZARR", "false"
+            "BIOMERO_REMOTE_SHALLOW_ZARR", "true"
         ).lower() != "true":
             raise ValueError("Remote shallow receipt consumption is disabled")
         used_receipts = set()

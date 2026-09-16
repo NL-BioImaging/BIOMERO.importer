@@ -31,6 +31,7 @@ def fixture(tmp_path, monkeypatch):
 
 def test_remote_result_bypasses_identity_and_normalization(tmp_path, monkeypatch):
     root, options = fixture(tmp_path, monkeypatch)
+    monkeypatch.delenv('BIOMERO_REMOTE_SHALLOW_ZARR')
     with patch('biomero_importer.utils.lifecycle.evaluate_returned_zarr', side_effect=AssertionError('rehash')), \
          patch('biomero_importer.utils.lifecycle.normalize_returned_zarr', side_effect=AssertionError('renormalize')):
         plan = ImportLifecycleEngine().prepare([root], options)
@@ -45,9 +46,9 @@ def test_remote_tamper_is_rejected(tmp_path, monkeypatch):
         ImportLifecycleEngine().prepare([root], options)
 
 
-def test_remote_receipt_requires_admin_enablement(tmp_path, monkeypatch):
+def test_remote_receipt_respects_admin_opt_out(tmp_path, monkeypatch):
     root, options = fixture(tmp_path, monkeypatch)
-    monkeypatch.delenv('BIOMERO_REMOTE_SHALLOW_ZARR')
+    monkeypatch.setenv('BIOMERO_REMOTE_SHALLOW_ZARR', 'false')
     with pytest.raises(ValueError, match='disabled'):
         ImportLifecycleEngine().prepare([root], options)
 

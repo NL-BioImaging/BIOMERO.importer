@@ -796,6 +796,11 @@ py -3.12 -m venv .venv
 
 ## Result storage provenance
 
+Shallow Zarr remains opt-in (`BIOMERO_SHALLOW_ZARR=true`). Remote shallowing is
+the default within this mode; set `BIOMERO_REMOTE_SHALLOW_ZARR=false` on the
+worker and importer to use local shallowing instead and avoid the helper's Slurm
+compute costs.
+
 The shallow-Zarr lifecycle records its actual outcome in
 `.biomero-import-storage.json` beside the result store. Local normalization
 records the executing shallower version; accepted remote receipts also record
