@@ -77,7 +77,7 @@ For advanced file tracking, containers can output JSON on the last line:
 ```json
 [
   {
-    "name": "Image Name",   
+    "name": "Image Name",
     "full_path": "File Path relative to the docker data volume (i.e. inputfile path)",
     "alt_path": "/out/processed_image.tif",
     "keyvalues": [
@@ -113,11 +113,11 @@ services:
     volumes:
       - "omero:/OMERO"
       - "./web/L-Drive:/data"  # Shared storage mounted as /data
-      
+
   omeroweb:
     volumes:
       - "./web/L-Drive:/data:rw"  # Same mount path, R/W access
-      
+
   biomero-importer:
     volumes:
       - "omero:/OMERO"

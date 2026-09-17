@@ -28,7 +28,7 @@ Submission queues an order; it does not wait for its import to finish.
 ## Example scripts
 
 You can use the provided test scripts shown below as examples.
-You can also configure some more settings for them: 
+You can also configure some more settings for them:
 ```yaml
 # Preprocessing settings
 preprocessing: true  # Enable containerized preprocessing
@@ -53,7 +53,7 @@ This script creates a test upload order and verifies the complete ingestion pipe
 ### Using the Test Main Script
 
 ```bash
-# Inside the container  
+# Inside the container
 python tests/t_main.py
 ```
 
@@ -76,7 +76,7 @@ order = IngestionTracking(
     group_name="Demo",
     user_name="researcher",
     destination_id="151",
-    destination_type="Dataset", 
+    destination_type="Dataset",
     stage=STAGE_NEW_ORDER,
     uuid=str(uuid.uuid4()),
     files=["/data/group/image1.tif", "/data/group/image2.tif"]

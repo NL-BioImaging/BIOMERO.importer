@@ -40,7 +40,7 @@ The system uses two main tables:
 - Stores optional Zarr registration choices in the nullable `import_options`
   JSON text column. Existing orders without it behave exactly as before.
 
-### `imports_preprocessing` 
+### `imports_preprocessing`
 - Stores preprocessing configuration for containerized workflows
 - Links to imports records via foreign key
 - Supports dynamic parameters via JSON field

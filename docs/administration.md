@@ -156,16 +156,16 @@ Check system status with direct database queries:
 
 ```sql
 -- View recent orders
-SELECT uuid, stage, group_name, user_name, timestamp 
-FROM imports 
+SELECT uuid, stage, group_name, user_name, timestamp
+FROM imports
 ORDER BY timestamp DESC LIMIT 10;
 
 -- Check pending orders
-SELECT * FROM imports 
+SELECT * FROM imports
 WHERE stage = 'Import Pending';
 
 -- View preprocessing jobs
-SELECT it.uuid, p.container, p.extra_params 
+SELECT it.uuid, p.container, p.extra_params
 FROM imports it
 JOIN imports_preprocessing p ON it.preprocessing_id = p.id
 WHERE it.stage = 'Import Started';
