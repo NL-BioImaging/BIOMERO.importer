@@ -31,7 +31,8 @@ dependencies = [
     "psycopg2>=2.9.7",
     "zarr>=3",
     "alembic>=1.13",
-    "biomero-schema>=0.2.1b1,<0.4"
+    "biomero-schema>=0.2.1b1,<0.4",
+    "biomero-shallower>=0.1.0b1,<0.2"
 ]
 
 [project.optional-dependencies]
@@ -51,9 +52,9 @@ find = {}  # Scan the project directory with the default parameters
 write_to = "biomero_importer/_version.py"
 
 [project.urls]
-"Homepage" = "https://github.com/Cellular-Imaging-Amsterdam-UMC/BIOMERO.importer"
-"Documentation" = "https://cellular-imaging-amsterdam-umc.github.io/NL-BIOMERO/"
-"Repository" = "https://github.com/Cellular-Imaging-Amsterdam-UMC/BIOMERO.importer"
+"Homepage" = "https://github.com/NL-BioImaging/BIOMERO.importer"
+"Documentation" = "https://nl-bioimaging.github.io/BIOMERO.importer/"
+"Repository" = "https://github.com/NL-BioImaging/BIOMERO.importer"
 
 [tool.pytest.ini_options]
 cache_dir = "/tmp/.pytest_cache"

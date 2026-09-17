@@ -28,6 +28,16 @@ RUN apt-get update && apt-get install -y \
     podman \
     unzip
 
+# Released dependencies are installed from pyproject.toml with the package below.
+# For development, uncomment this block and set the branches being tested.
+# ARG BIOMERO_SCHEMA_BRANCH=main
+# ARG BIOMERO_SHALLOWER_BRANCH=main
+# ADD "https://api.github.com/repos/NL-BioImaging/biomero-schema/commits/${BIOMERO_SCHEMA_BRANCH}" /latest_commit_biomero_schema
+# ADD "https://api.github.com/repos/NL-BioImaging/BIOMERO.shallower/commits/${BIOMERO_SHALLOWER_BRANCH}" /latest_commit_biomero_shallower
+# RUN pip install \
+#     "biomero-schema @ git+https://github.com/NL-BioImaging/biomero-schema.git@${BIOMERO_SCHEMA_BRANCH}" \
+#     "biomero-shallower @ git+https://github.com/NL-BioImaging/BIOMERO.shallower.git@${BIOMERO_SHALLOWER_BRANCH}"
+
 # Create a group and user with specified GID and UID
 RUN groupadd -g 1000 autoimportgroup && \
     useradd -m -r -u 1000 -g autoimportgroup autoimportuser
@@ -98,12 +108,12 @@ ENV _CONTAINERS_USERNS_CONFIGURED="" \
 # Copy the application code (when building from the repository context)
 COPY . /auto-importer
 
-# Install the package - use git version if available, otherwise use fallback version
+# Scope the fallback version to the importer so Git dependencies keep their versions.
 RUN if [ -d "/auto-importer/.git" ]; then \
         git config --global --add safe.directory /auto-importer && \
         pip install '/auto-importer[identity]'; \
     else \
-        SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install '/auto-importer[identity]'; \
+        SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BIOMERO_IMPORTER=0.0.0 pip install '/auto-importer[identity]'; \
     fi
 
 # Make the logs directory

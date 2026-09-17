@@ -114,6 +114,20 @@ def test_shallow_operation_is_disabled_by_default(tmp_path, monkeypatch):
         ImportLifecycleEngine().prepare([_zarr(tmp_path)], _options())
 
 
+def test_legacy_passthrough_decision_does_not_suppress_registration(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="skip-passthrough",
+            reason="input-image-unchanged-no-labels"),
+    )
+    plan = ImportLifecycleEngine().prepare([root], _options())
+    assert root in [item.path for item in plan.items]
+    assert root.exists()
+
+
 def test_eligible_image_becomes_label_registration_view(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
     (root / TRANSFER_INPUT_MARKER).write_text("{}", encoding="utf-8")
@@ -146,6 +160,26 @@ def test_eligible_image_becomes_label_registration_view(tmp_path, monkeypatch):
     ]
     assert plan.decisions == (decision,)
     assert not (root / TRANSFER_INPUT_MARKER).exists()
+    provenance = json.loads((root / '.biomero-import-storage.json').read_text())
+    assert provenance['storage'] == 'shallow-zarr'
+    assert provenance['location'] == 'importer'
+    assert provenance['tool_version']
+    assert provenance['workflow_id'] == str(WORKFLOW_ID)
+
+
+def test_label_free_shallow_image_keeps_primary_registration(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    collection = _collection()
+    collection = collection.model_copy(update={'images': (
+        collection.images[0].model_copy(update={'label_node_paths': (), 'label_components': ()}),
+    )})
+    monkeypatch.setenv('BIOMERO_SHALLOW_ZARR', 'true')
+    monkeypatch.setattr('biomero_importer.utils.lifecycle.evaluate_returned_zarr',
+                        lambda *args, **kwargs: ReturnedZarrDecision(store_path=root, outcome='eligible', reason='matched'))
+    monkeypatch.setattr('biomero_importer.utils.lifecycle.normalize_returned_zarr',
+                        lambda *args, **kwargs: NormalizedShallowResult(store_path=root, collection=collection, bytes_before=None, bytes_after=None))
+    plan = ImportLifecycleEngine().prepare([root], _options())
+    assert [(item.path, item.role) for item in plan.items] == [(root, 'primary')]
 
 
 def test_existing_manifest_is_idempotently_reused(tmp_path, monkeypatch):

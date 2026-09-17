@@ -1,0 +1,31 @@
+site_name: BIOMERO.importer
+site_description: Automated OMERO imports, preprocessing and shallow Zarr storage
+site_url: https://nl-bioimaging.github.io/BIOMERO.importer/
+repo_url: https://github.com/NL-BioImaging/BIOMERO.importer
+repo_name: NL-BioImaging/BIOMERO.importer
+edit_uri: edit/main/docs/
+validation:
+  links:
+    anchors: warn
+theme:
+  name: material
+  logo: https://raw.githubusercontent.com/NL-BioImaging/OMERO.biomero/refs/tags/v1.2.1/webapp/src/img/biomero-logo.svg
+  favicon: https://raw.githubusercontent.com/NL-BioImaging/OMERO.biomero/refs/tags/v1.2.1/webapp/src/img/biomero-logo.svg
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+plugins:
+  - search
+markdown_extensions:
+  - admonition
+  - tables
+  - pymdownx.superfences
+nav:
+  - Overview: index.md
+  - Administration: administration.md
+  - Storage and preprocessing: storage.md
+  - Import orders: import-orders.md
+  - Shallow Zarr: shallow-zarr.md
+  - Development: development.md
+  - Container security: security.md
