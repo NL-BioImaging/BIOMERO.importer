@@ -14,3 +14,4 @@ biomero_importer/_version.py
 .coverage
 logs/*
 /.idea
+/site/

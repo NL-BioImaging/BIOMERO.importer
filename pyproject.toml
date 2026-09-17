@@ -52,9 +52,9 @@ find = {}  # Scan the project directory with the default parameters
 write_to = "biomero_importer/_version.py"
 
 [project.urls]
-"Homepage" = "https://github.com/Cellular-Imaging-Amsterdam-UMC/BIOMERO.importer"
-"Documentation" = "https://cellular-imaging-amsterdam-umc.github.io/NL-BIOMERO/"
-"Repository" = "https://github.com/Cellular-Imaging-Amsterdam-UMC/BIOMERO.importer"
+"Homepage" = "https://github.com/NL-BioImaging/BIOMERO.importer"
+"Documentation" = "https://nl-bioimaging.github.io/BIOMERO.importer/"
+"Repository" = "https://github.com/NL-BioImaging/BIOMERO.importer"
 
 [tool.pytest.ini_options]
 cache_dir = "/tmp/.pytest_cache"
