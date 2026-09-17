@@ -28,15 +28,15 @@ RUN apt-get update && apt-get install -y \
     podman \
     unzip
 
-# Development-only dependency wiring for remote shallow-Zarr testing. The
-# branch-head requests invalidate this layer whenever either source advances.
-ARG BIOMERO_SCHEMA_BRANCH=feature/remote-shallower
-ARG BIOMERO_SHALLOWER_BRANCH=feature/remote-shallower
-ADD "https://api.github.com/repos/NL-BioImaging/biomero-schema/commits/${BIOMERO_SCHEMA_BRANCH}" /latest_commit_biomero_schema
-ADD "https://api.github.com/repos/NL-BioImaging/BIOMERO.shallower/commits/${BIOMERO_SHALLOWER_BRANCH}" /latest_commit_biomero_shallower
-RUN pip install \
-    "biomero-schema @ git+https://github.com/NL-BioImaging/biomero-schema.git@${BIOMERO_SCHEMA_BRANCH}" \
-    "biomero-shallower @ git+https://github.com/NL-BioImaging/BIOMERO.shallower.git@${BIOMERO_SHALLOWER_BRANCH}"
+# Released dependencies are installed from pyproject.toml with the package below.
+# For development, uncomment this block and set the branches being tested.
+# ARG BIOMERO_SCHEMA_BRANCH=main
+# ARG BIOMERO_SHALLOWER_BRANCH=main
+# ADD "https://api.github.com/repos/NL-BioImaging/biomero-schema/commits/${BIOMERO_SCHEMA_BRANCH}" /latest_commit_biomero_schema
+# ADD "https://api.github.com/repos/NL-BioImaging/BIOMERO.shallower/commits/${BIOMERO_SHALLOWER_BRANCH}" /latest_commit_biomero_shallower
+# RUN pip install \
+#     "biomero-schema @ git+https://github.com/NL-BioImaging/biomero-schema.git@${BIOMERO_SCHEMA_BRANCH}" \
+#     "biomero-shallower @ git+https://github.com/NL-BioImaging/BIOMERO.shallower.git@${BIOMERO_SHALLOWER_BRANCH}"
 
 # Create a group and user with specified GID and UID
 RUN groupadd -g 1000 autoimportgroup && \
