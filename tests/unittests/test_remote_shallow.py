@@ -7,6 +7,7 @@ from test_result_zarr import _make_image, _manifest, _input, _identity, Identity
 from biomero_schema.imports import ImportOptionsEnvelope, ShallowZarrImportOperation
 from biomero_schema.shallower import RemoteShallowReceipt, SHALLOW_OPERATION_REPORT
 from biomero_shallower.operations import normalize
+from biomero_shallower import __version__ as shallower_version
 from biomero_importer.utils.lifecycle import ImportLifecycleEngine
 
 
@@ -17,11 +18,12 @@ def fixture(tmp_path, monkeypatch):
     monkeypatch.setenv('BIOMERO_SHALLOW_ZARR', 'true')
     monkeypatch.setenv('BIOMERO_REMOTE_SHALLOW_ZARR', 'true')
     monkeypatch.setenv('BIOMERO_REMOTE_SHALLOWER_IMAGE', 'helper:0.1.0')
+    monkeypatch.setenv('BIOMERO_REMOTE_SHALLOWER_VERSION', shallower_version)
     monkeypatch.setenv('SLURM_JOB_ID', '123')
     task_id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
     normalize(root, manifest, identity_provider=IdentityProvider(_identity()),
               image='helper:0.1.0', task_id=task_id)
-    receipt = RemoteShallowReceipt(schema=1, image='helper:0.1.0', toolVersion='0.1.0',
+    receipt = RemoteShallowReceipt(schema=1, image='helper:0.1.0', toolVersion=shallower_version,
                                    artifactPath='result.zarr', slurmJobId='123', taskId=task_id,
                                    reportSha256=hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest())
     options = ImportOptionsEnvelope(operations=(ShallowZarrImportOperation(
@@ -43,6 +45,13 @@ def test_remote_tamper_is_rejected(tmp_path, monkeypatch):
     report = root / SHALLOW_OPERATION_REPORT
     report.write_text(report.read_text() + ' ')
     with pytest.raises(ValueError, match='checksum'):
+        ImportLifecycleEngine().prepare([root], options)
+
+
+def test_remote_version_mismatch_is_rejected(tmp_path, monkeypatch):
+    root, options = fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv('BIOMERO_REMOTE_SHALLOWER_VERSION', 'unexpected-version')
+    with pytest.raises(ValueError, match='administrator configuration'):
         ImportLifecycleEngine().prepare([root], options)
 
 
