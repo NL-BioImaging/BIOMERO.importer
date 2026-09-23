@@ -13,8 +13,13 @@ from biomero_schema.zarr import (
     CanonicalInputManifest,
     CanonicalZarrSource,
     PixelIdentity,
+    ShallowBindings,
     ShallowCollection,
-    ShallowImageReference,
+    ShallowImageBinding,
+    ShallowImageNode,
+    ShallowLabelBinding,
+    ShallowLabelNode,
+    ShallowManifest,
     ZarrLabelComponent,
 )
 
@@ -59,22 +64,36 @@ def _source():
     )
 
 
-def _collection():
+def _manifest():
     label = ZarrLabelComponent(
         logicalNodePath="labels/nuclei",
         pixelIdentity=_identity("labels/nuclei", "label"),
     )
-    return ShallowCollection(
+    return ShallowManifest(
         workflowId=WORKFLOW_ID,
         transferArtifact="result.zarr",
         interchangeProfile="ngff-0.4-zarr-v2",
-        images=(ShallowImageReference(
-            imageNodePath=".",
-            source=_source(),
-            returnedPixelIdentity=_identity(),
-            labelNodePaths=("labels/nuclei",),
-            labelComponents=(label,),
-        ),),
+        collection=ShallowCollection(
+            name="result.zarr",
+            images=(ShallowImageNode(id="image-0", name=".", nodePath="."),),
+            labels=(ShallowLabelNode(
+                id="label-0",
+                name="labels/nuclei",
+                nodePath="labels/nuclei",
+                sourceImageId="image-0",
+            ),),
+        ),
+        bindings=ShallowBindings(
+            images=(ShallowImageBinding(
+                nodeId="image-0",
+                source=_source(),
+                returnedPixelIdentity=_identity(),
+            ),),
+            labels=(ShallowLabelBinding(
+                nodeId="label-0",
+                component=label,
+            ),),
+        ),
     )
 
 
@@ -131,7 +150,7 @@ def test_legacy_passthrough_decision_does_not_suppress_registration(tmp_path, mo
 def test_eligible_image_keeps_primary_and_adds_label_registration_view(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
     (root / TRANSFER_INPUT_MARKER).write_text("{}", encoding="utf-8")
-    collection = _collection()
+    manifest = _manifest()
     decision = ReturnedZarrDecision(
         store_path=root,
         outcome="eligible",
@@ -147,7 +166,7 @@ def test_eligible_image_keeps_primary_and_adds_label_registration_view(tmp_path,
         "biomero_importer.utils.lifecycle.normalize_returned_zarr",
         lambda *args, **kwargs: NormalizedShallowResult(
             store_path=root,
-            collection=collection,
+            manifest=manifest,
             bytes_before=None,
             bytes_after=None,
         ),
@@ -170,15 +189,19 @@ def test_eligible_image_keeps_primary_and_adds_label_registration_view(tmp_path,
 
 def test_label_free_shallow_image_keeps_primary_registration(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
-    collection = _collection()
-    collection = collection.model_copy(update={'images': (
-        collection.images[0].model_copy(update={'label_node_paths': (), 'label_components': ()}),
-    )})
+    manifest = _manifest()
+    manifest = manifest.model_copy(update={
+        'collection': manifest.collection.model_copy(update={'labels': ()}),
+        'bindings': manifest.bindings.model_copy(update={'labels': ()}),
+    })
     monkeypatch.setenv('BIOMERO_SHALLOW_ZARR', 'true')
     monkeypatch.setattr('biomero_importer.utils.lifecycle.evaluate_returned_zarr',
                         lambda *args, **kwargs: ReturnedZarrDecision(store_path=root, outcome='eligible', reason='matched'))
     monkeypatch.setattr('biomero_importer.utils.lifecycle.normalize_returned_zarr',
-                        lambda *args, **kwargs: NormalizedShallowResult(store_path=root, collection=collection, bytes_before=None, bytes_after=None))
+                        lambda *args, **kwargs: NormalizedShallowResult(
+                            store_path=root, manifest=manifest,
+                            bytes_before=None, bytes_after=None,
+                        ))
     plan = ImportLifecycleEngine().prepare([root], _options())
     assert [(item.path, item.role) for item in plan.items] == [(root, 'primary')]
 
@@ -200,7 +223,7 @@ def test_disabling_label_views_still_registers_primary_image(tmp_path, monkeypat
         "biomero_importer.utils.lifecycle.normalize_returned_zarr",
         lambda *args, **kwargs: NormalizedShallowResult(
             store_path=root,
-            collection=_collection(),
+            manifest=_manifest(),
             bytes_before=None,
             bytes_after=None,
         ),
@@ -213,10 +236,56 @@ def test_disabling_label_views_still_registers_primary_image(tmp_path, monkeypat
     ]
 
 
+def test_plate_manifest_adds_requested_label_preview(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    manifest = _manifest()
+    plate_source = _source().model_copy(update={
+        'source_object_type': 'Plate',
+        'source_object_id': 7,
+    })
+    image_binding = manifest.bindings.images[0].model_copy(update={
+        'source': plate_source,
+    })
+    manifest = manifest.model_copy(update={
+        'bindings': manifest.bindings.model_copy(update={
+            'images': (image_binding,),
+        }),
+    })
+    operation = ShallowZarrImportOperation(
+        canonicalInputs=_options().operations[0].canonical_inputs,
+        importPlateLabelPreview=True,
+        plateLabelName='nuclei',
+    )
+    monkeypatch.setenv('BIOMERO_SHALLOW_ZARR', 'true')
+    monkeypatch.setattr(
+        'biomero_importer.utils.lifecycle.evaluate_returned_zarr',
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome='eligible', reason='matched',
+        ),
+    )
+    monkeypatch.setattr(
+        'biomero_importer.utils.lifecycle.normalize_returned_zarr',
+        lambda *args, **kwargs: NormalizedShallowResult(
+            store_path=root, manifest=manifest,
+            bytes_before=None, bytes_after=None,
+        ),
+    )
+
+    plan = ImportLifecycleEngine().prepare(
+        [root], ImportOptionsEnvelope(operations=(operation,)),
+    )
+
+    assert [item.role for item in plan.items] == [
+        'primary', 'plate-label-preview',
+    ]
+    assert plan.items[1].registration.plate_pixel_source == 'label'
+    assert plan.items[1].registration.plate_label_name == 'nuclei'
+
+
 def test_existing_manifest_is_idempotently_reused(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
     (root / ".biomero-shallow.json").write_text(
-        json.dumps(_collection().to_dict()),
+        json.dumps(_manifest().to_dict()),
         encoding="utf-8",
     )
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")

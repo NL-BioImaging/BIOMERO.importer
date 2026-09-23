@@ -23,6 +23,7 @@ from biomero_importer.utils.result_zarr import (
     normalize_returned_zarr,
     resolve_shallow_registration,
 )
+from biomero_shallower.pixel_identity import PixelIdentityError
 
 
 def _write_json(path: Path, value: dict) -> None:
@@ -351,13 +352,17 @@ def test_normalizes_plate_images_and_retains_image_level_label(tmp_path):
     assert not (root / "A/1/0/0").exists()
     assert not (root / "B/1/0/0").exists()
     assert (root / label_path).is_dir()
-    assert len(normalized.collection.images) == 2
+    assert len(normalized.manifest.collection.images) == 2
     images = {
-        image.image_node_path: image
-        for image in normalized.collection.images
+        image.node_path: image
+        for image in normalized.manifest.collection.images
     }
-    assert images["A/1/0"].label_node_paths == (label_path,)
-    assert images["B/1/0"].label_node_paths == ()
+    labels = {
+        label.source_image_id: label.node_path
+        for label in normalized.manifest.collection.labels
+    }
+    assert labels[images["A/1/0"].node_id] == label_path
+    assert images["B/1/0"].node_id not in labels
 
 
 def test_normalizes_renamed_plate_output_by_pixel_identity(tmp_path):
@@ -382,7 +387,7 @@ def test_normalizes_renamed_plate_output_by_pixel_identity(tmp_path):
 
     assert decision.eligible
     assert decision.matched_inputs[0].transfer_artifact == "plate.zarr"
-    assert normalized.collection.transfer_artifact == root.name
+    assert normalized.manifest.transfer_artifact == root.name
     assert (root / ".biomero-shallow.json").is_file()
     assert not (root / "A/1/0/0").exists()
     assert not (root / "B/1/0/0").exists()
@@ -606,12 +611,12 @@ def test_normalization_transaction_keeps_labels_and_omits_image_chunks(
     manifest = json.loads(
         (root / ".biomero-shallow.json").read_text(encoding="utf-8")
     )
-    assert manifest["model"] == "rfc8-shallow-copy"
-    assert manifest["images"][0]["source"]["sourceObjectId"] == 1
-    assert manifest["images"][0]["labelComponents"][0]["source"] is None
-    assert manifest["images"][0]["labelComponents"][0][
-        "pixelIdentity"
-    ]["role"] == "label"
+    assert manifest["format"] == "biomero-shallow-zarr"
+    assert manifest["schema"] == 2
+    assert manifest["bindings"]["images"][0]["source"]["sourceObjectId"] == 1
+    component = manifest["bindings"]["labels"][0]["component"]
+    assert component["source"] is None
+    assert component["pixelIdentity"]["role"] == "label"
     assert "multiscales" not in json.loads(
         (root / ".zattrs").read_text(encoding="utf-8")
     )
@@ -1003,7 +1008,7 @@ def test_materializes_whole_shallow_plate_with_all_image_labels(tmp_path):
     assert all(label.source is not None for label in result.labels)
 
 
-def test_materializes_legacy_shallow_manifest_without_component_records(
+def test_rejects_shallow_manifest_without_component_records(
     tmp_path,
 ):
     import_root = tmp_path / "data"
@@ -1025,31 +1030,19 @@ def test_materializes_legacy_shallow_manifest_without_component_records(
     )
     manifest_path = returned / ".biomero-shallow.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["images"][0].pop("labelComponents")
+    manifest["bindings"]["labels"][0].pop("component")
     _write_json(manifest_path, manifest)
     roots = {
         "import-mount-data": import_root,
         "group-0-data": group_root,
     }
-    registration = resolve_shallow_registration(
-        returned / "labels/cells",
-        storage_roots=roots,
-        import_mount_path=import_root,
-    )
-    destination = tmp_path / "full.zarr"
-
-    result = materialize_shallow_zarr(
-        registration.reference,
-        destination,
-        roots,
-        identity_provider=IdentityProvider(_identity()),
-    )
-
-    assert (
-        destination / "labels/cells/0/0.0.0.0"
-    ).read_bytes() == b"legacy-cells"
-    assert result.labels[0].source == ManagedZarrNode(
-        storage_root="import-mount-data",
-        relative_path="results/result.zarr",
-        node_path="labels/cells",
-    )
+    try:
+        resolve_shallow_registration(
+            returned / "labels/cells",
+            storage_roots=roots,
+            import_mount_path=import_root,
+        )
+    except PixelIdentityError as exc:
+        assert "Invalid shallow collection manifest" in str(exc)
+    else:
+        raise AssertionError("Incomplete shallow manifest must be rejected")

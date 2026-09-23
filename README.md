@@ -7,7 +7,7 @@ The BIOMERO.importer system enables automated uploading of image data from micro
 ## Documentation
 
 - [Importer documentation](https://nl-bioimaging.github.io/BIOMERO.importer/): configuration, storage, import orders and development.
-- [Shallow Zarr](https://nl-bioimaging.github.io/BIOMERO.importer/shallow-zarr/): local normalization and importing remotely shallowed results.
+- [Shallow Zarr](https://nl-bioimaging.github.io/BIOMERO.importer/shallow-zarr/): local shallowing and importing remotely shallowed results.
 - [NL-BIOMERO deployment guide](https://nl-bioimaging.github.io/NL-BIOMERO/): deploying the complete platform.
 - [Release history](https://github.com/NL-BioImaging/BIOMERO.importer/releases).
 
