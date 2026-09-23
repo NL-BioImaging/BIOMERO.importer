@@ -128,7 +128,7 @@ def test_legacy_passthrough_decision_does_not_suppress_registration(tmp_path, mo
     assert root.exists()
 
 
-def test_eligible_image_becomes_label_registration_view(tmp_path, monkeypatch):
+def test_eligible_image_keeps_primary_and_adds_label_registration_view(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
     (root / TRANSFER_INPUT_MARKER).write_text("{}", encoding="utf-8")
     collection = _collection()
@@ -156,6 +156,7 @@ def test_eligible_image_becomes_label_registration_view(tmp_path, monkeypatch):
     plan = ImportLifecycleEngine().prepare([root], _options())
 
     assert [(item.path, item.role) for item in plan.items] == [
+        (root, "primary"),
         (root / "labels" / "nuclei", "image-label")
     ]
     assert plan.decisions == (decision,)
@@ -182,6 +183,36 @@ def test_label_free_shallow_image_keeps_primary_registration(tmp_path, monkeypat
     assert [(item.path, item.role) for item in plan.items] == [(root, 'primary')]
 
 
+def test_disabling_label_views_still_registers_primary_image(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    operation = _options().operations[0].model_copy(
+        update={"import_image_label_views": False}
+    )
+    options = ImportOptionsEnvelope(operations=(operation,))
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="eligible", reason="matched"
+        ),
+    )
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr",
+        lambda *args, **kwargs: NormalizedShallowResult(
+            store_path=root,
+            collection=_collection(),
+            bytes_before=None,
+            bytes_after=None,
+        ),
+    )
+
+    plan = ImportLifecycleEngine().prepare([root], options)
+
+    assert [(item.path, item.role) for item in plan.items] == [
+        (root, "primary")
+    ]
+
+
 def test_existing_manifest_is_idempotently_reused(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
     (root / ".biomero-shallow.json").write_text(
@@ -197,6 +228,7 @@ def test_existing_manifest_is_idempotently_reused(tmp_path, monkeypatch):
     plan = ImportLifecycleEngine().prepare([root], _options())
 
     assert [item.path for item in plan.items] == [
+        root,
         root / "labels" / "nuclei"
     ]
     assert plan.decisions == ()

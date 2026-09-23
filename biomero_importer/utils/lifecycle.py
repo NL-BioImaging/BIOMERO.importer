@@ -150,13 +150,16 @@ def _items_for_shallow_collection(
         raise PixelIdentityError(
             "Shallow collection must contain only Image or only Plate sources"
         )
-    if not any(image.label_node_paths for image in collection.images):
-        return (PreparedImportItem(
-            path=root, registration=ZarrImportOptions(), role="primary",
-        ),)
+    # The collection root is the user-facing workflow result. Its registered
+    # PixelBuffer resolves to the canonical source pixels while the attached
+    # shallow reference exposes every result label to label-aware viewers.
+    # Label projections remain optional auxiliary objects for workflows that
+    # still select an OMERO Image and consume its pixels as a TIFF mask.
+    items = [PreparedImportItem(
+        path=root, registration=ZarrImportOptions(), role="primary",
+    )]
     if not operation.import_image_label_views:
-        return ()
-    items = []
+        return tuple(items)
     for image in collection.images:
         local_components = (
             component for component in image.label_components
