@@ -16,7 +16,7 @@ from biomero_schema.imports import (
 )
 from biomero_schema.zarr import (
     SHALLOW_COLLECTION_MANIFEST,
-    ShallowCollection,
+    ShallowManifest,
     ZarrImportOptions,
 )
 
@@ -78,12 +78,12 @@ def _is_zarr(path: Path) -> bool:
     )
 
 
-def _load_shallow_collection(path: Path) -> ShallowCollection | None:
+def _load_shallow_manifest(path: Path) -> ShallowManifest | None:
     manifest = path / SHALLOW_COLLECTION_MANIFEST
     if not manifest.is_file():
         return None
     try:
-        return ShallowCollection.from_dict(json.loads(
+        return ShallowManifest.from_dict(json.loads(
             manifest.read_text(encoding="utf-8")
         ))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -93,16 +93,21 @@ def _load_shallow_collection(path: Path) -> ShallowCollection | None:
 
 
 def _common_plate_label(
-    collection: ShallowCollection,
+    manifest: ShallowManifest,
     requested: str | None,
 ) -> str | None:
     labels_per_image = []
-    for image in collection.images:
-        if image.source.source_object_type != "Plate":
+    for image in manifest.collection.images:
+        if manifest.image_binding(image.node_id).source.source_object_type != "Plate":
             return None
-        prefix = PurePosixPath(image.image_node_path) / "labels"
+        prefix = PurePosixPath(image.node_path) / "labels"
         names = set()
-        for path in image.label_node_paths:
+        paths = (
+            label.node_path
+            for label in manifest.collection.labels
+            if label.source_image_id == image.node_id
+        )
+        for path in paths:
             try:
                 relative = PurePosixPath(path).relative_to(prefix)
             except ValueError:
@@ -116,13 +121,13 @@ def _common_plate_label(
     return next(iter(common)) if len(common) == 1 else None
 
 
-def _items_for_shallow_collection(
+def _items_for_shallow_manifest(
     root: Path,
-    collection: ShallowCollection,
+    manifest: ShallowManifest,
     operation: ShallowZarrImportOperation,
 ) -> tuple[PreparedImportItem, ...]:
     source_types = {
-        image.source.source_object_type for image in collection.images
+        binding.source.source_object_type for binding in manifest.bindings.images
     }
     if source_types == {"Plate"}:
         items = [PreparedImportItem(
@@ -132,7 +137,7 @@ def _items_for_shallow_collection(
         )]
         if operation.import_plate_label_preview:
             label_name = _common_plate_label(
-                collection,
+                manifest,
                 operation.plate_label_name,
             )
             if label_name is not None:
@@ -150,22 +155,18 @@ def _items_for_shallow_collection(
         raise PixelIdentityError(
             "Shallow collection must contain only Image or only Plate sources"
         )
-    if not any(image.label_node_paths for image in collection.images):
+    if not manifest.collection.labels:
         return (PreparedImportItem(
             path=root, registration=ZarrImportOptions(), role="primary",
         ),)
     if not operation.import_image_label_views:
         return ()
     items = []
-    for image in collection.images:
+    for image in manifest.collection.images:
         local_components = (
-            component for component in image.label_components
-            if component.source is None
-        )
-        paths = (
-            tuple(component.logical_node_path for component in local_components)
-            if image.label_components
-            else image.label_node_paths
+            binding.component
+            for binding in manifest.label_bindings_for_image(image.node_id)
+            if binding.component.source is None
         )
         items.extend(
             PreparedImportItem(
@@ -173,7 +174,9 @@ def _items_for_shallow_collection(
                 registration=ZarrImportOptions(),
                 role="image-label",
             )
-            for path in paths
+            for path in (
+                component.logical_node_path for component in local_components
+            )
         )
     return tuple(items)
 
@@ -268,7 +271,7 @@ class ImportLifecycleEngine:
             if not _is_zarr(root):
                 prepared.append(item)
                 continue
-            existing = _load_shallow_collection(root)
+            existing = _load_shallow_manifest(root)
             receipts = [receipt for receipt in operation.remote_receipts
                         if root.as_posix().endswith("/" + receipt.artifact_path)]
             if not receipts and operation.remote_receipts and (root / SHALLOW_OPERATION_REPORT).is_file():
@@ -319,7 +322,7 @@ class ImportLifecycleEngine:
                 self.logger.info(
                     "Reusing existing shallow Zarr manifest for %s", root
                 )
-                prepared.extend(_items_for_shallow_collection(
+                prepared.extend(_items_for_shallow_manifest(
                     root, existing, operation
                 ))
                 continue
@@ -366,10 +369,10 @@ class ImportLifecycleEngine:
             self.logger.info(
                 "Stored shallow Zarr %s with %s image node(s)",
                 root,
-                len(normalized.collection.images),
+                len(normalized.manifest.collection.images),
             )
-            prepared.extend(_items_for_shallow_collection(
-                root, normalized.collection, operation
+            prepared.extend(_items_for_shallow_manifest(
+                root, normalized.manifest, operation
             ))
         if used_receipts != {receipt.artifact_path for receipt in operation.remote_receipts}:
             raise ValueError("Remote shallow receipt has no matching import file")
