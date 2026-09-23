@@ -106,13 +106,22 @@ Canonical storage must remain available through the configured shared mounts
 and storage mappings. Deleting or moving the canonical arrays breaks results
 that reference them. See [storage and preprocessing](storage.md).
 
-## Plate registration and provenance
+## Image and Plate registration
+
+An eligible Image result registers its shallow collection root as the primary
+OMERO Image. Its PixelBuffer uses the canonical source pixels and its shallow
+reference exposes the result labels to label-aware viewers. When
+`importImageLabelViews` is enabled, the importer also registers lightweight
+label projections so TIFF-based workflows can select and export an individual
+mask without copying its arrays.
 
 The default Plate registration uses canonical source pixels while preserving
 the result's Plate, Well and WellSample hierarchy. The optional
 `platePixelSource="label"` and `plateLabelName` registration options create a
 label-backed Plate view without copying arrays. The selected label must exist
 on every image; incomplete selections fail instead of substituting a label.
+
+## Provenance
 
 Input `.biomero-input.json` markers disambiguate renamed results with identical
 pixels. They must match the operation's canonical manifest and are consumed

@@ -37,7 +37,10 @@ def test_remote_result_bypasses_identity_and_normalization(tmp_path, monkeypatch
     with patch('biomero_importer.utils.lifecycle.evaluate_returned_zarr', side_effect=AssertionError('rehash')), \
          patch('biomero_importer.utils.lifecycle.normalize_returned_zarr', side_effect=AssertionError('renormalize')):
         plan = ImportLifecycleEngine().prepare([root], options)
-    assert plan.items[0].path == root / 'labels/cells'
+    assert [(item.path, item.role) for item in plan.items] == [
+        (root, 'primary'),
+        (root / 'labels/cells', 'image-label'),
+    ]
 
 
 def test_remote_tamper_is_rejected(tmp_path, monkeypatch):
@@ -67,7 +70,10 @@ def test_user_renaming_keeps_original_verified_receipt(tmp_path, monkeypatch):
     renamed = root.with_name('renamed.zarr')
     root.rename(renamed)
     plan = ImportLifecycleEngine().prepare([renamed], options)
-    assert plan.items[0].path == renamed / 'labels/cells'
+    assert [(item.path, item.role) for item in plan.items] == [
+        (renamed, 'primary'),
+        (renamed / 'labels/cells', 'image-label'),
+    ]
 
 
 def test_full_fallback_can_normalize_locally_and_retry(tmp_path, monkeypatch):

@@ -155,13 +155,16 @@ def _items_for_shallow_manifest(
         raise PixelIdentityError(
             "Shallow collection must contain only Image or only Plate sources"
         )
-    if not manifest.collection.labels:
-        return (PreparedImportItem(
-            path=root, registration=ZarrImportOptions(), role="primary",
-        ),)
-    if not operation.import_image_label_views:
-        return ()
-    items = []
+    # The collection root is the user-facing workflow result. Its registered
+    # PixelBuffer resolves to the canonical source pixels while the attached
+    # shallow reference exposes every result label to label-aware viewers.
+    # Label projections remain optional auxiliary objects for workflows that
+    # still select an OMERO Image and consume its pixels as a TIFF mask.
+    items = [PreparedImportItem(
+        path=root, registration=ZarrImportOptions(), role="primary",
+    )]
+    if not manifest.collection.labels or not operation.import_image_label_views:
+        return tuple(items)
     for image in manifest.collection.images:
         local_components = (
             binding.component
