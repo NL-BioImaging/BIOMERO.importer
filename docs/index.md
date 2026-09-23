@@ -50,7 +50,7 @@ The system uses two main tables:
 - [Administration](administration.md): configuration, environment and monitoring.
 - [Storage and preprocessing](storage.md): shared paths, converter output and permissions.
 - [Import orders](import-orders.md): submitting data through the client API.
-- [Shallow Zarr](shallow-zarr.md): canonical pixels, local normalization and remote receipts.
+- [Shallow Zarr](shallow-zarr.md): canonical pixels, local shallowing and remote receipts.
 - [Development](development.md): tests and database migrations.
 - [Container security](security.md): nested Podman and deployment constraints.
 
