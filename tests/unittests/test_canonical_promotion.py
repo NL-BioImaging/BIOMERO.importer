@@ -79,13 +79,13 @@ def test_verifies_and_atomically_promotes_first_export(tmp_path):
 
     expected = (
         tmp_path
-        / "managed/project/dataset/.processed/Image-3207.g1.ome.zarr"
+        / "managed/project/dataset/.processed/Image-3207.ome.zarr"
     )
     assert result.path == expected
     assert not staging.exists()
     assert result.source.storage_root == "group-3-data"
     assert result.source.relative_path == (
-        "project/dataset/.processed/Image-3207.g1.ome.zarr"
+        "project/dataset/.processed/Image-3207.ome.zarr"
     )
     assert result.source.pixel_identity == identity()
     assert result.source.canonical_pixel_verified is True
