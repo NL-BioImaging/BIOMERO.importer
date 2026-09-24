@@ -57,7 +57,7 @@ class CanonicalStore:
             raise ValueError("object_type must be Image or Plate")
         if object_id < 1 or source_generation < 1:
             raise ValueError("object_id and source_generation must be positive")
-        return f"{object_type}-{object_id}.g{source_generation}.ome.zarr"
+        return f"{object_type}-{object_id}.ome.zarr"
 
     def relative_path_for(
         self,

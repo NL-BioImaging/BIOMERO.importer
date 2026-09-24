@@ -35,7 +35,7 @@ def source_record():
     return {
         "schema": 1,
         "storageRoot": "group-5-data",
-        "relativePath": "project/.processed/Image-3207.g1.ome.zarr",
+        "relativePath": "project/.processed/Image-3207.ome.zarr",
         "nodePath": ".",
         "sourceObjectType": "Image",
         "sourceObjectId": 3207,
@@ -72,10 +72,19 @@ def test_builds_deterministic_processed_path(tmp_path):
 
     relative = store.relative_path_for("project", "Image", 3207, 1)
 
-    assert relative == Path("project/.processed/Image-3207.g1.ome.zarr")
+    assert relative == Path("project/.processed/Image-3207.ome.zarr")
     assert store.resolve(relative) == (
-        tmp_path / "project/.processed/Image-3207.g1.ome.zarr"
+        tmp_path / "project/.processed/Image-3207.ome.zarr"
     )
+
+
+def test_source_generation_does_not_create_another_store(tmp_path):
+    store = CanonicalStore(tmp_path)
+
+    first = store.relative_path_for("project", "Plate", 9, 1)
+    second = store.relative_path_for("project", "Plate", 9, 2)
+
+    assert first == second == Path("project/.processed/Plate-9.ome.zarr")
 
 
 def test_accepts_shared_pydantic_source_contract(tmp_path, source_record):
@@ -84,7 +93,7 @@ def test_accepts_shared_pydantic_source_contract(tmp_path, source_record):
     destination = CanonicalStore(tmp_path).destination_for(source)
 
     assert destination == (
-        tmp_path / "project/.processed/Image-3207.g1.ome.zarr"
+        tmp_path / "project/.processed/Image-3207.ome.zarr"
     )
 
 
@@ -103,7 +112,7 @@ def test_accepts_shared_plate_source_contract(tmp_path):
     )
     image_source = CanonicalZarrSource(
         storageRoot="group-5-data",
-        relativePath="project/.processed/Plate-9.g1.ome.zarr",
+        relativePath="project/.processed/Plate-9.ome.zarr",
         nodePath="A/1/0",
         sourceObjectType="Plate",
         sourceObjectId=9,
@@ -115,7 +124,7 @@ def test_accepts_shared_plate_source_contract(tmp_path):
     )
     plate = CanonicalPlateSource(
         storageRoot="group-5-data",
-        relativePath="project/.processed/Plate-9.g1.ome.zarr",
+        relativePath="project/.processed/Plate-9.ome.zarr",
         sourceObjectId=9,
         sourceGeneration=1,
         interchangeProfile="ngff-0.4-zarr-v2",
@@ -128,7 +137,7 @@ def test_accepts_shared_plate_source_contract(tmp_path):
     destination = CanonicalStore(tmp_path).destination_for(plate)
 
     assert destination == (
-        tmp_path / "project/.processed/Plate-9.g1.ome.zarr"
+        tmp_path / "project/.processed/Plate-9.ome.zarr"
     )
 
 
