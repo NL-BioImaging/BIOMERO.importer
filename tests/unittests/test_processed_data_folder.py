@@ -46,5 +46,5 @@ def test_processed_paths_follow_environment(
     assert (str(tmp_path), "/data") in mounts
     store = canonical_store.CanonicalStore(tmp_path)
     relative = store.relative_path_for("project", "Image", 3207, 1)
-    assert relative == Path("project") / expected / "Image-3207.g1.ome.zarr"
+    assert relative == Path("project") / expected / "Image-3207.ome.zarr"
     assert store.resolve(relative) == tmp_path / relative
