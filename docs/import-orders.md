@@ -25,6 +25,18 @@ order_uuid = submit_import_order(order)
 Use an existing destination ID appropriate to the data (`Screen` for Plates).
 Submission queues an order; it does not wait for its import to finish.
 
+## OME-Zarr channel metadata
+
+Image and Plate registration copies available channel excitation and emission
+wavelengths from `omero.channels` into OMERO. Use `excitation_wavelength` and
+`emission_wavelength`, with optional matching `_unit` fields. Values without
+units are interpreted as nanometres; physical length units are converted to
+nanometres for storage. Camel-case and OME-style names such as
+`excitationWavelength` and `ExcitationWavelength` are also accepted.
+
+Missing wavelengths leave existing metadata intact. Invalid values are skipped
+with a warning. Copying this metadata does not read or change pixel data.
+
 ## Example scripts
 
 You can use the provided test scripts shown below as examples.
