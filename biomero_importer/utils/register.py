@@ -29,6 +29,7 @@ from zarr.core.sync import sync
 
 import argparse
 import locale
+import logging
 import platform
 import sys
 import tempfile
@@ -427,6 +428,66 @@ def set_channel_names(conn, iid, omero_attrs):
     conn.setChannelNames("Image", [iid], nameDict)
 
 
+def _channel_wavelength(entry, kind):
+    keys = (f"{kind}_wavelength", f"{kind}Wavelength",
+            f"{kind.capitalize()}Wavelength")
+    value = next((entry[key] for key in keys if key in entry), None)
+    if value is None:
+        return None
+    unit_keys = (f"{kind}_wavelength_unit", f"{kind}WavelengthUnit",
+                 f"{kind.capitalize()}WavelengthUnit")
+    unit_name = next((entry[key] for key in unit_keys
+                      if entry.get(key) is not None), "nm")
+    try:
+        if isinstance(value, bool):
+            raise ValueError("boolean wavelength")
+        number = float(value)
+        if not isfinite(number) or number <= 0:
+            raise ValueError("wavelength must be positive and finite")
+        symbol_units = {
+            "nm": UnitsLength.NANOMETER, "um": UnitsLength.MICROMETER,
+            "\u00b5m": UnitsLength.MICROMETER, "\u03bcm": UnitsLength.MICROMETER,
+        }
+        unit_text = str(unit_name).strip().lower()
+        unit = symbol_units.get(unit_text) or get_unit_length(unit_text)
+        if unit in (None, UnitsLength.PIXEL, UnitsLength.REFERENCEFRAME):
+            raise ValueError("wavelength requires a physical length unit")
+        wavelength = LengthI(LengthI(number, unit), UnitsLength.NANOMETER)
+        if not isfinite(wavelength.getValue()) or wavelength.getValue() <= 0:
+            raise ValueError("converted wavelength must be positive and finite")
+        return wavelength
+    except (TypeError, ValueError, OverflowError):
+        logging.getLogger(__name__).warning(
+            "Ignoring invalid %s wavelength %r with unit %r",
+            kind, value, unit_name,
+        )
+        return None
+
+
+def set_channel_wavelengths(conn, image, omero_attrs):
+    """Save supplied physical channel metadata without opening pixel data."""
+    values = []
+    for entry in omero_attrs.get("channels", []):
+        wavelengths = {}
+        for kind, field in (("excitation", "excitationWave"),
+                            ("emission", "emissionWave")):
+            value = _channel_wavelength(entry, kind)
+            if value is not None:
+                wavelengths[field] = value
+        values.append(wavelengths)
+    if not any(values):
+        return
+    changed = []
+    for channel, wavelengths in zip(image.getChannels(noRE=True), values):
+        if wavelengths:
+            logical = channel.getLogicalChannel()._obj
+            for field, value in wavelengths.items():
+                setattr(logical, field, value)
+            changed.append(logical)
+    if changed:
+        conn.getUpdateService().saveAndReturnArray(changed)
+
+
 def set_rendering_settings(conn, image, image_attrs, pixels_type, families=None, models=None):
     '''
     Extract the rendering settings and the channels information
@@ -435,6 +496,7 @@ def set_rendering_settings(conn, image, image_attrs, pixels_type, families=None,
     if omero_info is None:
         return None
     set_channel_names(conn, image.id, omero_info)
+    set_channel_wavelengths(conn, image, omero_info)
 
     if families is None:
         families = load_families(conn.getQueryService())
