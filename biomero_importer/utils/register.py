@@ -20,7 +20,9 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 from urllib.parse import urlsplit
-from copy import copy
+from copy import copy, deepcopy
+from itertools import product
+from math import isfinite
 import zarr
 from zarr.core.buffer import default_buffer_prototype
 from zarr.core.sync import sync
@@ -256,6 +258,85 @@ def parse_image_metadata(store, img_attrs, image_path=None):
     return sizes, pixel_size, pixels_type
 
 
+def _valid_label_window(window):
+    if not isinstance(window, dict):
+        return False
+    try:
+        start, end = float(window["start"]), float(window["end"])
+        return isfinite(start) and isfinite(end) and start < end
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _label_channel_range(array, channel_axis, channel):
+    """Read one storage chunk at a time; never assemble a full label plane."""
+    starts = [
+        range(0, size, chunk) if axis != channel_axis else (channel,)
+        for axis, (size, chunk) in enumerate(zip(array.shape, array.chunks))
+    ]
+    low, high = 0, 1  # Background stays black, including all-zero masks.
+    for offset in product(*starts):
+        selection = tuple(
+            slice(start, min(size, start + (1 if axis == channel_axis else chunk)))
+            for axis, (start, size, chunk) in enumerate(
+                zip(offset, array.shape, array.chunks)
+            )
+        )
+        pixels = array[selection]
+        if pixels.size:
+            low = min(low, int(pixels.min()))
+            high = max(high, int(pixels.max()))
+    return {"start": low, "end": high}
+
+
+def label_rendering_metadata(store, image_attrs, image_path=None,
+                             channel_count=None, is_label=False):
+    """Fill label display defaults in memory, without editing the backing Zarr."""
+    relative_parts = (image_path or "").strip("/").split("/")
+    if not (is_label or "image-label" in image_attrs
+            or "labels" in relative_parts[:-1]):
+        return image_attrs
+    attrs = deepcopy(image_attrs)
+    info = attrs.get("omero")
+    if not isinstance(info, dict):
+        info = {}
+        attrs["omero"] = info
+    channels = info.get("channels")
+    if not isinstance(channels, list):
+        channels = []
+    channels = [entry if isinstance(entry, dict) else {} for entry in channels]
+
+    # Complete display metadata avoids opening or scanning pixel data.
+    complete = (
+        bool(channels)
+        and (channel_count is None or len(channels) == channel_count)
+        and all(_valid_label_window(entry.get("window")) for entry in channels)
+    )
+    if not complete:
+        multiscale = attrs["multiscales"][0]
+        array_path = multiscale["datasets"][0]["path"]
+        if image_path is not None:
+            array_path = image_path.rstrip("/") + "/" + array_path
+        array = load_array(store, array_path)
+        axes = [
+            axis if isinstance(axis, str) else axis["name"]
+            for axis in multiscale["axes"]
+        ]
+        channel_axis = axes.index("c") if "c" in axes else None
+        count = array.shape[channel_axis] if channel_axis is not None else 1
+        channels = (channels + [{} for _ in range(count)])[:count]
+        for index, entry in enumerate(channels):
+            if not _valid_label_window(entry.get("window")):
+                entry["window"] = _label_channel_range(array, channel_axis, index)
+    for index, entry in enumerate(channels):
+        entry.setdefault("label", "Labels" if len(channels) == 1
+                         else f"Labels {index + 1}")
+        entry.setdefault("active", True)
+        entry.setdefault("color", "FFFFFF")
+    info["channels"] = channels
+    return attrs
+
+
 def create_image(conn, store, image_attrs, object_name, families, models, args, image_path=None):
     '''
     Create an Image/Pixels object
@@ -268,6 +349,14 @@ def create_image(conn, store, image_attrs, object_name, families, models, args, 
     size_x = sizes.get("x", 1)
     size_y = sizes.get("y", 1)
     size_c = sizes.get("c", 1)
+    uri_parts = urlsplit(str(args.uri).replace("\\", "/")).path.split("/")
+    is_label = any(
+        part.endswith(".zarr") and "labels" in uri_parts[index + 1:-1]
+        for index, part in enumerate(uri_parts)
+    )
+    image_attrs = label_rendering_metadata(
+        store, image_attrs, image_path, channel_count=size_c, is_label=is_label,
+    )
     # if channels is None or len(channels) != size_c:
     channels = list(range(sizes.get("c", 1)))
     omero_pixels_type = query_service.findByQuery("from PixelsType as p where p.value='%s'" % PIXELS_TYPE[pixels_type], None)

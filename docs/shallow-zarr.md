@@ -121,6 +121,43 @@ the result's Plate, Well and WellSample hierarchy. The optional
 label-backed Plate view without copying arrays. The selected label must exist
 on every image; incomplete selections fail instead of substituting a label.
 
+### Label image names and display
+
+Imported label images include their source store and, for nested images, their
+field or series path. For example, `result.ome.zarr/labels/labels_cells` becomes
+`result_labels_cells`; `plate.zarr/A/1/0/labels/cells` becomes
+`plate_A_1_0_cells`. This changes the OMERO name only.
+
+The importer preserves valid `omero.channels[].window` settings on the label
+group itself. Missing channel activation and colour settings default to active
+and white. It does not copy contrast settings from the source intensity image.
+When a label window is missing or invalid, the importer reads the
+full-resolution label array one storage chunk at a time and saves a window
+from zero to its maximum ID in OMERO. All-background masks use 0–1. Label IDs,
+array types and Zarr metadata remain unchanged.
+
+This fallback adds a full label-array read during import; its working memory
+depends on storage chunk size. Producers can avoid that scan by writing valid
+display windows on each label group, for example:
+
+```json
+{
+  "omero": {
+    "channels": [{
+      "label": "Cells",
+      "active": true,
+      "color": "FFFFFF",
+      "window": {"min": 0, "max": 4294967295, "start": 0, "end": 407272}
+    }]
+  }
+}
+```
+
+Use the actual maximum label ID, not the number of objects or a reduced
+pyramid's maximum. For OME-Zarr 0.5 this metadata belongs under the group's
+`ome` attribute; see the [OME-Zarr specification](https://ngff.openmicroscopy.org/0.5/).
+Existing imported images keep their saved names and rendering settings.
+
 ## Provenance
 
 Input `.biomero-input.json` markers disambiguate renamed results with identical

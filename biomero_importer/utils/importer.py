@@ -10,6 +10,7 @@ from subprocess import Popen, PIPE, STDOUT
 from importlib import import_module
 from pathlib import PurePath
 from threading import Event, Thread
+from urllib.parse import urlsplit
 
 import ezomero
 from omero.gateway import BlitzGateway
@@ -115,6 +116,20 @@ def omero_connection_keepalive(
 
 def _zarr_import_title(uri):
     """Derive an OMERO object name from a Zarr URI."""
+    path = urlsplit(str(uri).replace("\\", "/")).path.rstrip("/")
+    parts = path.split("/")
+    for index, part in enumerate(parts):
+        if part.endswith(".zarr") and "labels" in parts[index + 1:]:
+            label_index = parts.index("labels", index + 1)
+            if label_index + 1 < len(parts):
+                source = "_".join(
+                    [part.removesuffix(".zarr").removesuffix(".ome")]
+                    + parts[index + 1:label_index]
+                )
+                label = "_".join(parts[label_index + 1:])
+                if label.startswith(source + "_"):
+                    return label
+                return f"{source}_{label}"
     file_title = os.path.splitext(os.path.basename(uri))[0]
     return file_title.removesuffix('.ome')
 
@@ -657,7 +672,7 @@ class DataPackageImporter:
         # Also using updates from https://github.com/ome/omero-cli-zarr/blob/master/src/omero_zarr/zarr_import.py
         from .register import (load_attrs, register_image, register_plate, link_to_target, validate_endpoint,
                                get_omexml_bytes, full_import, parse_image_metadata, set_rendering_settings,
-                               set_external_info)
+                               set_external_info, label_rendering_metadata)
         import zarr
         from types import SimpleNamespace
 
@@ -749,6 +764,10 @@ class DataPackageImporter:
                         image_attrs = load_attrs(store, image_path)
                         # pixels_type is only used if we have *incomplete* `omero` metadata
                         sizes, pixel_size, pixels_type = parse_image_metadata(store, image_attrs, image_path)
+                        image_attrs = label_rendering_metadata(
+                            store, image_attrs, image_path,
+                            channel_count=sizes.get("c", 1),
+                        )
                         rnd_def = set_rendering_settings(conn, image, image_attrs, pixels_type)
                         if rnd_def is not None:
                             conn.getUpdateService().saveAndReturnObject(rnd_def)
