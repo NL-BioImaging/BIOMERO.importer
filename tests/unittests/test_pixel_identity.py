@@ -109,14 +109,14 @@ def test_reads_nested_plate_image_node(tmp_path):
             lambda node: write_json(
                 node / ".zattrs", {"multiscales": [{"version": "0.5"}]}
             ),
-            "NGFF 0.4",
+            "Unsupported NGFF image metadata",
         ),
         (
             lambda node: write_json(
                 node / "0" / ".zarray",
                 {"zarr_format": 3, "shape": [8, 8], "dtype": "uint8"},
             ),
-            "Zarr v2",
+            "Image group and array Zarr formats differ",
         ),
     ],
 )
