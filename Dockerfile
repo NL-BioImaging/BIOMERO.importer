@@ -108,8 +108,12 @@ ENV _CONTAINERS_USERNS_CONFIGURED="" \
 # Copy the application code (when building from the repository context)
 COPY . /auto-importer
 
-# Scope the fallback version to the importer so Git dependencies keep their versions.
-RUN if [ -d "/auto-importer/.git" ]; then \
+# A submodule build context has a .git file rather than the repository metadata.
+# Supply the release tag explicitly so local release builds retain their version.
+ARG BIOMERO_IMPORTER_VERSION
+RUN if [ -n "$BIOMERO_IMPORTER_VERSION" ]; then \
+        SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BIOMERO_IMPORTER="$BIOMERO_IMPORTER_VERSION" pip install '/auto-importer[identity]'; \
+    elif [ -d "/auto-importer/.git" ]; then \
         git config --global --add safe.directory /auto-importer && \
         pip install '/auto-importer[identity]'; \
     else \

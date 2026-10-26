@@ -39,6 +39,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          build-args: |
+            BIOMERO_IMPORTER_VERSION=${{ github.event.release.tag_name }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
