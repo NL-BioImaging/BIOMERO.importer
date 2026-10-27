@@ -1,6 +1,8 @@
 """Registration-independent lifecycle operations for importer orders."""
 
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import logging
@@ -76,6 +78,41 @@ def _is_zarr(path: Path) -> bool:
         or (path / ".zattrs").is_file()
         or (path / "zarr.json").is_file()
     )
+
+
+def _require_no_pending_prune(root: Path):
+    if next(root.parent.glob(f".{root.name}.biomero-prune-*"), None) is not None:
+        raise ValueError(
+            "Interrupted shallow transaction needs recovery; enable "
+            "BIOMERO_RESULT_RECOVERY on storage supporting locks before retrying")
+
+
+@contextmanager
+def _recover_result_store(root: Path):
+    """Use legacy preparation when recovery is off or locking is unsupported."""
+    enabled = os.getenv("BIOMERO_RESULT_RECOVERY", "false").strip().lower() == "true"
+    if not enabled:
+        _require_no_pending_prune(root)
+        yield
+        return
+    if root.is_symlink():
+        raise ValueError("Cannot normalize a symlinked Zarr store")
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(locked(root))
+        except OSError as exc:
+            if exc.errno not in (errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP):
+                raise
+            _require_no_pending_prune(root)
+            logging.getLogger(__name__).warning(
+                "Filesystem locking is unsupported for %s; using legacy import "
+                "preparation without recovery or concurrency protection", root)
+            yield
+            return
+        # Restore an interrupted prune before inspecting any metadata.
+        # Keep the lock through normalization and registration planning.
+        recover(root)
+        yield
 
 
 def _load_shallow_manifest(path: Path) -> ShallowManifest | None:
@@ -274,12 +311,7 @@ class ImportLifecycleEngine:
             if not _is_zarr(root):
                 prepared.append(item)
                 continue
-            if root.is_symlink():
-                raise ValueError("Cannot normalize a symlinked Zarr store")
-            with locked(root):
-                # Restore an interrupted prune before inspecting any metadata.
-                # Keep the lock through normalization and registration planning.
-                recover(root)
+            with _recover_result_store(root):
                 existing = _load_shallow_manifest(root)
                 receipts = [receipt for receipt in operation.remote_receipts
                             if root.as_posix().endswith("/" + receipt.artifact_path)]

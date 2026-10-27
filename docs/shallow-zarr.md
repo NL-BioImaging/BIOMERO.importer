@@ -108,17 +108,38 @@ that reference them. See [storage and preprocessing](storage.md).
 
 ## Interrupted imports and recovery
 
-Before inspecting a shallow-operation result, the importer obtains the shared
+Set `BIOMERO_RESULT_RECOVERY=true` on the importer and workflow worker to enable
+durable result recovery. This is independent of `BIOMERO_SHALLOW_ZARR`; missing,
+empty or false leaves it disabled. Ordinary imports without a lifecycle operation
+are unaffected. The default shallow path adds no new locks or recovery writes
+and keeps the existing normalization filesystem requirements.
+
+When recovery is enabled, before inspecting a result the importer obtains the shared
 shallower filesystem lock and recovers any interrupted prune journal. Recovery
 restores uncommitted pixel moves and metadata before evaluating the store or
 reusing its shallow manifest. The same path applies to v2 and v3. The lock remains
 held through normalization and registration-plan preparation; it is released if
-the process dies. Shared storage must provide working filesystem locks.
+the process dies. Opt-in storage must provide working shared filesystem locks
+and the shallower's atomic move and synchronization requirements.
+
+An explicit unsupported-lock error uses legacy preparation with a warning,
+provided no interrupted prune journal exists. This retains the existing
+normalization behavior without adding recovery or concurrency protection.
+Busy locks, permissions, storage errors and failures during recovery or
+normalization do not trigger this fallback. Interrupted transactions still
+require working locks before preparation can continue.
 
 A busy store, conflicting journal or incomplete recovery fails preparation.
 The importer does not register the incomplete store or reinterpret it as a full
 result. Keep the result and its sibling `.biomero-prune-*` journal for diagnosis;
-do not delete the journal to bypass recovery. Symlinked result roots are rejected.
+do not delete the journal to bypass recovery. Symlinked result roots are rejected
+in the opted-in path. Disabling recovery while a prune journal exists does not
+authorize reading a potentially incomplete store: re-enable recovery and resolve
+the journal first.
+
+There is no migration or scan of old OMERO images, Plates or Zarrs. The scripts'
+small recovery record belongs to a newly staged workflow-result import plan,
+not each image; historical data is considered only when explicitly retried.
 
 Filesystem recovery is separate from OMERO registration. An order can fail after
 registering some of its objects, and startup marks interrupted orders failed.
