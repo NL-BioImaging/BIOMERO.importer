@@ -61,7 +61,9 @@ def test_remote_version_mismatch_is_rejected(tmp_path, monkeypatch):
 def test_remote_receipt_respects_admin_opt_out(tmp_path, monkeypatch):
     root, options = fixture(tmp_path, monkeypatch)
     monkeypatch.setenv('BIOMERO_REMOTE_SHALLOW_ZARR', 'false')
-    with pytest.raises(ValueError, match='disabled'):
+    with patch('biomero_importer.utils.lifecycle._recover_result_store',
+               side_effect=AssertionError('disabled receipt started recovery')), \
+         pytest.raises(ValueError, match='disabled'):
         ImportLifecycleEngine().prepare([root], options)
 
 

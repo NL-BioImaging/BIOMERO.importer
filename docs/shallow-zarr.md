@@ -106,6 +106,51 @@ Canonical storage must remain available through the configured shared mounts
 and storage mappings. Deleting or moving the canonical arrays breaks results
 that reference them. See [storage and preprocessing](storage.md).
 
+## Interrupted imports and recovery
+
+Recovery is automatic within an explicitly requested shallow lifecycle operation
+and needs no additional feature flag. `BIOMERO_SHALLOW_ZARR=true` is still
+required; disabled shallow operations are rejected before locking or recovery.
+Remote receipts also require `BIOMERO_REMOTE_SHALLOW_ZARR` to remain enabled.
+Ordinary imports without a lifecycle operation are unaffected, even when shallow
+storage is enabled. Before inspecting a shallow result,
+the importer obtains the shared
+shallower filesystem lock and recovers any interrupted prune journal. Recovery
+restores uncommitted pixel moves and metadata before evaluating the store or
+reusing its shallow manifest. The same path applies to v2 and v3. The lock remains
+held through normalization and registration-plan preparation; it is released if
+the process dies. Recovery storage must provide working shared filesystem locks
+and the shallower's atomic move and synchronization requirements.
+
+An explicit unsupported-lock error uses legacy preparation with a warning,
+provided no interrupted prune journal exists. This retains the existing
+normalization behavior without adding recovery or concurrency protection.
+Busy locks, permissions, storage errors and failures during recovery or
+normalization do not trigger this fallback. Interrupted transactions still
+require working locks before preparation can continue.
+
+A busy store, conflicting journal or incomplete recovery fails preparation.
+The importer does not register the incomplete store or reinterpret it as a full
+result. Keep the result and its sibling `.biomero-prune-*` journal for diagnosis;
+do not delete the journal to bypass recovery. Symlinked result roots are rejected.
+Resolve an interrupted journal on storage supporting recovery before retrying.
+
+There is no migration or scan of old OMERO images, Plates or Zarrs. The scripts'
+small recovery record belongs to a newly staged workflow-result import plan,
+not each image; historical data is considered only when explicitly retried.
+
+Filesystem recovery is separate from OMERO registration. An order can fail after
+registering some of its objects, and startup marks interrupted orders failed.
+Review the order's log and registered objects before issuing a replacement.
+These changes do not automatically requeue failed orders or guarantee exactly
+one registration for arbitrary external clients that submit duplicate orders.
+BIOMERO result scripts use a saved order plan to resume polling existing orders.
+Before creating a plan they test the new durable-write requirements using
+disposable metadata. Unsupported file synchronization, atomic replacement or
+POSIX directory synchronization selects legacy order submission before any
+import is queued. A saved plan cannot be bypassed through this fallback.
+The importer's existing normalization write requirements are unchanged.
+
 ## Image and Plate registration
 
 An eligible Image result registers its shallow collection root as the primary

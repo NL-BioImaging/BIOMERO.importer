@@ -1,5 +1,7 @@
+import errno
 import json
 from pathlib import Path
+from unittest.mock import Mock
 from uuid import UUID
 
 import pytest
@@ -29,6 +31,8 @@ from biomero_importer.utils.result_zarr import (
     NormalizedShallowResult,
     ReturnedZarrDecision,
 )
+from biomero_shallower.operations import locked
+from biomero_shallower.transaction import begin
 
 
 WORKFLOW_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -116,8 +120,204 @@ def _zarr(tmp_path):
     return root
 
 
-def test_no_operations_preserve_paths_without_execution(tmp_path):
-    path = tmp_path / "input.tif"
+@pytest.mark.parametrize("metadata_name", [".zattrs", "zarr.json"])
+def test_interrupted_pruning_is_recovered_before_reading_store(
+    tmp_path, monkeypatch, metadata_name,
+):
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
+    root = _zarr(tmp_path)
+    (root / ".zattrs").unlink()
+    metadata = root / metadata_name
+    original_metadata = b'{"original": true}'
+    metadata.write_bytes(original_metadata)
+    pixels = root / "0"
+    pixels.mkdir()
+    (pixels / "chunk").write_bytes(bytes(range(256)))
+    rollback = root.parent / f".{root.name}.biomero-prune-crash"
+    rollback.mkdir()
+    begin(root, rollback, [pixels], {metadata: original_metadata})
+    pixels.rename(rollback / "0")
+    metadata.write_text('{"partial": true}', encoding="utf-8")
+    (root / ".biomero-shallow.json").write_text("incomplete", encoding="utf-8")
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+
+    def evaluate(*args, **kwargs):
+        assert (pixels / "chunk").read_bytes() == bytes(range(256))
+        assert metadata.read_bytes() == original_metadata
+        assert not rollback.exists()
+        assert not (root / ".biomero-shallow.json").exists()
+        return ReturnedZarrDecision(
+            store_path=root, outcome="keep-full", reason="different-pixels")
+
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr", evaluate)
+    plan = ImportLifecycleEngine().prepare([root], _options())
+    assert plan.items[0].path == root
+
+
+def test_conflicting_recovery_journal_blocks_registration(tmp_path, monkeypatch):
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
+    root = _zarr(tmp_path)
+    pixels = root / "0"
+    pixels.mkdir()
+    rollback = root.parent / f".{root.name}.biomero-prune-crash"
+    rollback.mkdir()
+    begin(root, rollback, [pixels], {})
+    (rollback / "0").mkdir()
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: pytest.fail("read an unrecovered store"))
+    with pytest.raises(ValueError, match="Conflicting recovery"):
+        ImportLifecycleEngine().prepare([root], _options())
+    assert pixels.exists() and (rollback / "0").exists()
+
+
+def test_busy_store_is_not_evaluated_or_modified(tmp_path, monkeypatch):
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
+    root = _zarr(tmp_path)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: pytest.fail("read a concurrently modified store"))
+    with locked(root):
+        with pytest.raises((ValueError, OSError)):
+            ImportLifecycleEngine().prepare([root], _options())
+
+
+@pytest.mark.parametrize("value", [None, "", "false", "TRUE"])
+def test_shallow_recovery_is_automatic_without_a_feature_flag(
+    tmp_path, monkeypatch, value,
+):
+    root = _zarr(tmp_path)
+    if value is None:
+        monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
+    else:
+        monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", value)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+
+    recovered = Mock()
+    monkeypatch.setattr("biomero_importer.utils.lifecycle.recover", recovered)
+
+    def evaluate(*args, **kwargs):
+        recovered.assert_called_once_with(root)
+        return ReturnedZarrDecision(store_path=root, outcome="eligible", reason="matched")
+
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        evaluate)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr",
+        lambda *a, **k: NormalizedShallowResult(
+            store_path=root, manifest=_manifest(), bytes_before=None, bytes_after=None))
+    plan = ImportLifecycleEngine().prepare([root], _options())
+    assert plan.items[0].path == root
+    assert len(plan.items) == 2
+
+
+def test_unclassified_lock_error_does_not_fall_back(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+
+    def unsupported(*args, **kwargs):
+        raise OSError("filesystem does not support locks")
+
+    monkeypatch.setattr("biomero_importer.utils.lifecycle.locked", unsupported)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *a, **k: pytest.fail("unsafe unlocked evaluation"))
+    with pytest.raises(OSError, match="does not support locks"):
+        ImportLifecycleEngine().prepare([root], _options())
+
+
+@pytest.mark.parametrize("code", [errno.ENOSYS, errno.EOPNOTSUPP])
+def test_unsupported_lock_uses_legacy_normalization(tmp_path, monkeypatch, caplog, code):
+    root = _zarr(tmp_path)
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+
+    def unsupported(*args, **kwargs):
+        raise OSError(code, "locking unsupported")
+
+    monkeypatch.setattr("biomero_importer.utils.lifecycle.locked", unsupported)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.recover",
+        lambda *a: pytest.fail("recovery without a lock"))
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *a, **k: ReturnedZarrDecision(
+            store_path=root, outcome="eligible", reason="matched"))
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr",
+        lambda *a, **k: NormalizedShallowResult(
+            store_path=root, manifest=_manifest(), bytes_before=None, bytes_after=None))
+    plan = ImportLifecycleEngine().prepare([root], _options())
+    assert plan.items[0].path == root
+    assert len(plan.items) == 2
+    assert "legacy" in caplog.text.lower()
+
+
+def test_unsupported_lock_cannot_bypass_interrupted_prune(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    (root.parent / f".{root.name}.biomero-prune-crash").mkdir()
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+
+    def unsupported(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "locking unsupported")
+
+    monkeypatch.setattr("biomero_importer.utils.lifecycle.locked", unsupported)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *a, **k: pytest.fail("read an interrupted prune without recovery"))
+    with pytest.raises(ValueError, match="Interrupted shallow transaction"):
+        ImportLifecycleEngine().prepare([root], _options())
+
+
+def test_unsupported_error_during_recovery_is_not_a_lock_fallback(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+
+    def failed_recovery(*args):
+        raise OSError(errno.EOPNOTSUPP, "recovery operation unsupported")
+
+    monkeypatch.setattr("biomero_importer.utils.lifecycle.recover", failed_recovery)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *a, **k: pytest.fail("ignored failed recovery"))
+    with pytest.raises(OSError, match="recovery operation unsupported"):
+        ImportLifecycleEngine().prepare([root], _options())
+
+
+def test_incomplete_journal_stops_automatic_recovery(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    journal = root.parent / f".{root.name}.biomero-prune-crash"
+    journal.mkdir()
+    (journal / "uncommitted-chunk").write_bytes(b"retained")
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *a, **k: pytest.fail("read an unrecovered store"))
+    with pytest.raises(ValueError, match="Incomplete recovery journal"):
+        ImportLifecycleEngine().prepare([root], _options())
+
+
+@pytest.mark.parametrize("shallow_flag", [None, "false", "true"])
+def test_no_operations_preserve_paths_without_execution(
+    tmp_path, monkeypatch, shallow_flag,
+):
+    if shallow_flag is None:
+        monkeypatch.delenv("BIOMERO_SHALLOW_ZARR", raising=False)
+    else:
+        monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", shallow_flag)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle._recover_result_store",
+        Mock(side_effect=AssertionError("ordinary import attempted shallow recovery")),
+    )
+    path = _zarr(tmp_path)
 
     plan = ImportLifecycleEngine().prepare([path], None)
 
@@ -126,8 +326,18 @@ def test_no_operations_preserve_paths_without_execution(tmp_path):
     assert plan.changed is False
 
 
-def test_shallow_operation_is_disabled_by_default(tmp_path, monkeypatch):
-    monkeypatch.delenv("BIOMERO_SHALLOW_ZARR", raising=False)
+@pytest.mark.parametrize("shallow_flag", [None, "false", "FALSE", ""])
+def test_disabled_shallow_operation_cannot_start_recovery(
+    tmp_path, monkeypatch, shallow_flag,
+):
+    if shallow_flag is None:
+        monkeypatch.delenv("BIOMERO_SHALLOW_ZARR", raising=False)
+    else:
+        monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", shallow_flag)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle._recover_result_store",
+        Mock(side_effect=AssertionError("disabled shallow recovery was entered")),
+    )
 
     with pytest.raises(ValueError, match="disabled"):
         ImportLifecycleEngine().prepare([_zarr(tmp_path)], _options())

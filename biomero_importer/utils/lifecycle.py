@@ -1,6 +1,8 @@
 """Registration-independent lifecycle operations for importer orders."""
 
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import logging
@@ -22,9 +24,9 @@ from biomero_schema.zarr import (
 
 from .pixel_identity import PixelIdentityError
 from biomero_schema.shallower import SHALLOW_OPERATION_REPORT, ShallowOperationReport
-from biomero_shallower.operations import validate_report
+from biomero_shallower.operations import locked, validate_report
 from biomero_shallower import __version__ as shallower_version
-from biomero_shallower.transaction import write_json
+from biomero_shallower.transaction import recover, write_json
 from .result_zarr import (
     ReturnedZarrDecision,
     discover_ngff_nodes,
@@ -76,6 +78,36 @@ def _is_zarr(path: Path) -> bool:
         or (path / ".zattrs").is_file()
         or (path / "zarr.json").is_file()
     )
+
+
+def _require_no_pending_prune(root: Path):
+    if next(root.parent.glob(f".{root.name}.biomero-prune-*"), None) is not None:
+        raise ValueError(
+            "Interrupted shallow transaction needs recovery on storage "
+            "supporting locks before retrying")
+
+
+@contextmanager
+def _recover_result_store(root: Path):
+    """Recover automatically, using legacy preparation if locks are unsupported."""
+    if root.is_symlink():
+        raise ValueError("Cannot normalize a symlinked Zarr store")
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(locked(root))
+        except OSError as exc:
+            if exc.errno not in (errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP):
+                raise
+            _require_no_pending_prune(root)
+            logging.getLogger(__name__).warning(
+                "Filesystem locking is unsupported for %s; using legacy import "
+                "preparation without recovery or concurrency protection", root)
+            yield
+            return
+        # Restore an interrupted prune before inspecting any metadata.
+        # Keep the lock through normalization and registration planning.
+        recover(root)
+        yield
 
 
 def _load_shallow_manifest(path: Path) -> ShallowManifest | None:
@@ -274,109 +306,110 @@ class ImportLifecycleEngine:
             if not _is_zarr(root):
                 prepared.append(item)
                 continue
-            existing = _load_shallow_manifest(root)
-            receipts = [receipt for receipt in operation.remote_receipts
-                        if root.as_posix().endswith("/" + receipt.artifact_path)]
-            if not receipts and operation.remote_receipts and (root / SHALLOW_OPERATION_REPORT).is_file():
-                # User result renaming changes the directory name after transfer.
-                # Bind to the unchanged trusted report instead of rewriting it.
-                checksum = hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
+            with _recover_result_store(root):
+                existing = _load_shallow_manifest(root)
                 receipts = [receipt for receipt in operation.remote_receipts
-                            if receipt.report_sha256 == checksum]
-            if len(receipts) > 1:
-                raise ValueError("Ambiguous remote shallow receipt")
-            if receipts:
-                receipt = receipts[0]
-                if receipt.artifact_path in used_receipts:
-                    raise ValueError("Remote shallow receipt matches multiple stores")
-                used_receipts.add(receipt.artifact_path)
-                expected_image = os.getenv(
-                    "BIOMERO_REMOTE_SHALLOWER_IMAGE",
-                    "cellularimagingcf/biomero-shallower:0.1.0",
+                            if root.as_posix().endswith("/" + receipt.artifact_path)]
+                if not receipts and operation.remote_receipts and (root / SHALLOW_OPERATION_REPORT).is_file():
+                    # User result renaming changes the directory name after transfer.
+                    # Bind to the unchanged trusted report instead of rewriting it.
+                    checksum = hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
+                    receipts = [receipt for receipt in operation.remote_receipts
+                                if receipt.report_sha256 == checksum]
+                if len(receipts) > 1:
+                    raise ValueError("Ambiguous remote shallow receipt")
+                if receipts:
+                    receipt = receipts[0]
+                    if receipt.artifact_path in used_receipts:
+                        raise ValueError("Remote shallow receipt matches multiple stores")
+                    used_receipts.add(receipt.artifact_path)
+                    expected_image = os.getenv(
+                        "BIOMERO_REMOTE_SHALLOWER_IMAGE",
+                        "cellularimagingcf/biomero-shallower:0.1.0",
+                    )
+                    expected_version = os.getenv("BIOMERO_REMOTE_SHALLOWER_VERSION", "0.1.0")
+                    if receipt.image != expected_image or receipt.tool_version != expected_version:
+                        raise ValueError("Remote shallow helper differs from administrator configuration")
+                    actual = hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
+                    if actual != receipt.report_sha256:
+                        raise ValueError("Remote shallow report checksum mismatch")
+                    report = validate_report(root, operation.canonical_inputs,
+                                             image=expected_image, tool_version=expected_version,
+                                             artifact=PurePosixPath(receipt.artifact_path).name)
+                    if (report.result != "normalized" or report.task_id != receipt.task_id
+                            or report.slurm_job_id != receipt.slurm_job_id):
+                        raise ValueError("Remote shallow task provenance mismatch")
+                    write_json(root / '.biomero-import-storage.json', {
+                        'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
+                        'storage': 'shallow-zarr', 'location': 'remote',
+                        'container': receipt.image, 'tool_version': receipt.tool_version,
+                        'task_id': str(receipt.task_id), 'job_id': receipt.slurm_job_id,
+                        'report_sha256': receipt.report_sha256,
+                    })
+                elif (root / SHALLOW_OPERATION_REPORT).exists():
+                    attempt = ShallowOperationReport.from_dict(json.loads(
+                        (root / SHALLOW_OPERATION_REPORT).read_text(encoding="utf-8")))
+                    if attempt.result == "normalized":
+                        raise ValueError("Remote shallow result is missing its trusted receipt")
+                    # Preserve fallback provenance without marking the later local
+                    # normalization as a remotely completed operation on retry.
+                    (root / SHALLOW_OPERATION_REPORT).replace(root / ".biomero-remote-attempt.json")
+                if existing is not None:
+                    self.logger.info(
+                        "Reusing existing shallow Zarr manifest for %s", root
+                    )
+                    prepared.extend(_items_for_shallow_manifest(
+                        root, existing, operation
+                    ))
+                    continue
+                self.logger.info(
+                    "Evaluating returned Zarr %s with %s identity worker(s)",
+                    root,
+                    workers,
                 )
-                expected_version = os.getenv("BIOMERO_REMOTE_SHALLOWER_VERSION", "0.1.0")
-                if receipt.image != expected_image or receipt.tool_version != expected_version:
-                    raise ValueError("Remote shallow helper differs from administrator configuration")
-                actual = hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
-                if actual != receipt.report_sha256:
-                    raise ValueError("Remote shallow report checksum mismatch")
-                report = validate_report(root, operation.canonical_inputs,
-                                         image=expected_image, tool_version=expected_version,
-                                         artifact=PurePosixPath(receipt.artifact_path).name)
-                if (report.result != "normalized" or report.task_id != receipt.task_id
-                        or report.slurm_job_id != receipt.slurm_job_id):
-                    raise ValueError("Remote shallow task provenance mismatch")
+                decision = evaluate_returned_zarr(
+                    root,
+                    operation.canonical_inputs,
+                    identity_workers=workers,
+                )
+                decisions.append(decision)
+                self.logger.info(
+                    "Returned Zarr decision for %s: %s (%s)",
+                    root,
+                    decision.outcome,
+                    decision.reason,
+                )
+                if remove_transfer_input_marker(root):
+                    self.logger.info(
+                        "Consumed temporary Zarr input marker for %s", root
+                    )
+                if not decision.eligible:
+                    write_json(root / '.biomero-import-storage.json', {
+                        'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
+                        'storage': 'full-zarr', 'location': 'importer',
+                        'tool_version': shallower_version, 'reason': decision.reason,
+                    })
+                    prepared.extend(_full_result_items(
+                        root, operation, item.registration
+                    ))
+                    continue
+                normalized = normalize_returned_zarr(
+                    decision,
+                    operation.canonical_inputs.workflow_id,
+                )
                 write_json(root / '.biomero-import-storage.json', {
                     'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
-                    'storage': 'shallow-zarr', 'location': 'remote',
-                    'container': receipt.image, 'tool_version': receipt.tool_version,
-                    'task_id': str(receipt.task_id), 'job_id': receipt.slurm_job_id,
-                    'report_sha256': receipt.report_sha256,
+                    'storage': 'shallow-zarr', 'location': 'importer',
+                    'tool_version': shallower_version,
                 })
-            elif (root / SHALLOW_OPERATION_REPORT).exists():
-                attempt = ShallowOperationReport.from_dict(json.loads(
-                    (root / SHALLOW_OPERATION_REPORT).read_text(encoding="utf-8")))
-                if attempt.result == "normalized":
-                    raise ValueError("Remote shallow result is missing its trusted receipt")
-                # Preserve fallback provenance without marking the later local
-                # normalization as a remotely completed operation on retry.
-                (root / SHALLOW_OPERATION_REPORT).replace(root / ".biomero-remote-attempt.json")
-            if existing is not None:
                 self.logger.info(
-                    "Reusing existing shallow Zarr manifest for %s", root
+                    "Stored shallow Zarr %s with %s image node(s)",
+                    root,
+                    len(normalized.manifest.collection.images),
                 )
                 prepared.extend(_items_for_shallow_manifest(
-                    root, existing, operation
+                    root, normalized.manifest, operation
                 ))
-                continue
-            self.logger.info(
-                "Evaluating returned Zarr %s with %s identity worker(s)",
-                root,
-                workers,
-            )
-            decision = evaluate_returned_zarr(
-                root,
-                operation.canonical_inputs,
-                identity_workers=workers,
-            )
-            decisions.append(decision)
-            self.logger.info(
-                "Returned Zarr decision for %s: %s (%s)",
-                root,
-                decision.outcome,
-                decision.reason,
-            )
-            if remove_transfer_input_marker(root):
-                self.logger.info(
-                    "Consumed temporary Zarr input marker for %s", root
-                )
-            if not decision.eligible:
-                write_json(root / '.biomero-import-storage.json', {
-                    'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
-                    'storage': 'full-zarr', 'location': 'importer',
-                    'tool_version': shallower_version, 'reason': decision.reason,
-                })
-                prepared.extend(_full_result_items(
-                    root, operation, item.registration
-                ))
-                continue
-            normalized = normalize_returned_zarr(
-                decision,
-                operation.canonical_inputs.workflow_id,
-            )
-            write_json(root / '.biomero-import-storage.json', {
-                'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
-                'storage': 'shallow-zarr', 'location': 'importer',
-                'tool_version': shallower_version,
-            })
-            self.logger.info(
-                "Stored shallow Zarr %s with %s image node(s)",
-                root,
-                len(normalized.manifest.collection.images),
-            )
-            prepared.extend(_items_for_shallow_manifest(
-                root, normalized.manifest, operation
-            ))
         if used_receipts != {receipt.artifact_path for receipt in operation.remote_receipts}:
             raise ValueError("Remote shallow receipt has no matching import file")
         return tuple(prepared), tuple(decisions)
