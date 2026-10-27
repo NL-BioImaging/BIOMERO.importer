@@ -108,18 +108,14 @@ that reference them. See [storage and preprocessing](storage.md).
 
 ## Interrupted imports and recovery
 
-Set `BIOMERO_RESULT_RECOVERY=true` on the importer and workflow worker to enable
-durable result recovery. This is independent of `BIOMERO_SHALLOW_ZARR`; missing,
-empty or false leaves it disabled. Ordinary imports without a lifecycle operation
-are unaffected. The default shallow path adds no new locks or recovery writes
-and keeps the existing normalization filesystem requirements.
-
-When recovery is enabled, before inspecting a result the importer obtains the shared
+Recovery is automatic and needs no additional feature flag. Ordinary imports
+without a lifecycle operation are unaffected. Before inspecting a shallow result,
+the importer obtains the shared
 shallower filesystem lock and recovers any interrupted prune journal. Recovery
 restores uncommitted pixel moves and metadata before evaluating the store or
 reusing its shallow manifest. The same path applies to v2 and v3. The lock remains
 held through normalization and registration-plan preparation; it is released if
-the process dies. Opt-in storage must provide working shared filesystem locks
+the process dies. Recovery storage must provide working shared filesystem locks
 and the shallower's atomic move and synchronization requirements.
 
 An explicit unsupported-lock error uses legacy preparation with a warning,
@@ -132,10 +128,8 @@ require working locks before preparation can continue.
 A busy store, conflicting journal or incomplete recovery fails preparation.
 The importer does not register the incomplete store or reinterpret it as a full
 result. Keep the result and its sibling `.biomero-prune-*` journal for diagnosis;
-do not delete the journal to bypass recovery. Symlinked result roots are rejected
-in the opted-in path. Disabling recovery while a prune journal exists does not
-authorize reading a potentially incomplete store: re-enable recovery and resolve
-the journal first.
+do not delete the journal to bypass recovery. Symlinked result roots are rejected.
+Resolve an interrupted journal on storage supporting recovery before retrying.
 
 There is no migration or scan of old OMERO images, Plates or Zarrs. The scripts'
 small recovery record belongs to a newly staged workflow-result import plan,
@@ -147,6 +141,11 @@ Review the order's log and registered objects before issuing a replacement.
 These changes do not automatically requeue failed orders or guarantee exactly
 one registration for arbitrary external clients that submit duplicate orders.
 BIOMERO result scripts use a saved order plan to resume polling existing orders.
+Before creating a plan they test the new durable-write requirements using
+disposable metadata. Unsupported file synchronization, atomic replacement or
+POSIX directory synchronization selects legacy order submission before any
+import is queued. A saved plan cannot be bypassed through this fallback.
+The importer's existing normalization write requirements are unchanged.
 
 ## Image and Plate registration
 

@@ -1,6 +1,7 @@
 import errno
 import json
 from pathlib import Path
+from unittest.mock import Mock
 from uuid import UUID
 
 import pytest
@@ -123,7 +124,7 @@ def _zarr(tmp_path):
 def test_interrupted_pruning_is_recovered_before_reading_store(
     tmp_path, monkeypatch, metadata_name,
 ):
-    monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", "true")
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
     root = _zarr(tmp_path)
     (root / ".zattrs").unlink()
     metadata = root / metadata_name
@@ -155,7 +156,7 @@ def test_interrupted_pruning_is_recovered_before_reading_store(
 
 
 def test_conflicting_recovery_journal_blocks_registration(tmp_path, monkeypatch):
-    monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", "true")
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
     root = _zarr(tmp_path)
     pixels = root / "0"
     pixels.mkdir()
@@ -173,7 +174,7 @@ def test_conflicting_recovery_journal_blocks_registration(tmp_path, monkeypatch)
 
 
 def test_busy_store_is_not_evaluated_or_modified(tmp_path, monkeypatch):
-    monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", "true")
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
     root = _zarr(tmp_path)
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
     monkeypatch.setattr(
@@ -184,8 +185,8 @@ def test_busy_store_is_not_evaluated_or_modified(tmp_path, monkeypatch):
             ImportLifecycleEngine().prepare([root], _options())
 
 
-@pytest.mark.parametrize("value", [None, "", "false", "FALSE"])
-def test_default_shallow_import_does_not_require_new_filesystem_locks(
+@pytest.mark.parametrize("value", [None, "", "false", "TRUE"])
+def test_shallow_recovery_is_automatic_without_a_feature_flag(
     tmp_path, monkeypatch, value,
 ):
     root = _zarr(tmp_path)
@@ -195,15 +196,16 @@ def test_default_shallow_import_does_not_require_new_filesystem_locks(
         monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", value)
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
 
-    def unsupported(*args, **kwargs):
-        raise OSError("filesystem does not support locks")
+    recovered = Mock()
+    monkeypatch.setattr("biomero_importer.utils.lifecycle.recover", recovered)
 
-    monkeypatch.setattr("biomero_importer.utils.lifecycle.locked", unsupported)
-    monkeypatch.setattr("biomero_importer.utils.lifecycle.recover", unsupported)
+    def evaluate(*args, **kwargs):
+        recovered.assert_called_once_with(root)
+        return ReturnedZarrDecision(store_path=root, outcome="eligible", reason="matched")
+
     monkeypatch.setattr(
         "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
-        lambda *a, **k: ReturnedZarrDecision(
-            store_path=root, outcome="eligible", reason="matched"))
+        evaluate)
     monkeypatch.setattr(
         "biomero_importer.utils.lifecycle.normalize_returned_zarr",
         lambda *a, **k: NormalizedShallowResult(
@@ -213,9 +215,9 @@ def test_default_shallow_import_does_not_require_new_filesystem_locks(
     assert len(plan.items) == 2
 
 
-def test_opted_in_import_does_not_silently_bypass_unsupported_lock(tmp_path, monkeypatch):
+def test_unclassified_lock_error_does_not_fall_back(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
-    monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", "true")
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
 
     def unsupported(*args, **kwargs):
@@ -232,7 +234,7 @@ def test_opted_in_import_does_not_silently_bypass_unsupported_lock(tmp_path, mon
 @pytest.mark.parametrize("code", [errno.ENOSYS, errno.EOPNOTSUPP])
 def test_unsupported_lock_uses_legacy_normalization(tmp_path, monkeypatch, caplog, code):
     root = _zarr(tmp_path)
-    monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", "true")
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
 
     def unsupported(*args, **kwargs):
@@ -259,7 +261,7 @@ def test_unsupported_lock_uses_legacy_normalization(tmp_path, monkeypatch, caplo
 def test_unsupported_lock_cannot_bypass_interrupted_prune(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
     (root.parent / f".{root.name}.biomero-prune-crash").mkdir()
-    monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", "true")
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
 
     def unsupported(*args, **kwargs):
@@ -275,7 +277,7 @@ def test_unsupported_lock_cannot_bypass_interrupted_prune(tmp_path, monkeypatch)
 
 def test_unsupported_error_during_recovery_is_not_a_lock_fallback(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
-    monkeypatch.setenv("BIOMERO_RESULT_RECOVERY", "true")
+    monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
 
     def failed_recovery(*args):
@@ -289,15 +291,17 @@ def test_unsupported_error_during_recovery_is_not_a_lock_fallback(tmp_path, monk
         ImportLifecycleEngine().prepare([root], _options())
 
 
-def test_pending_journal_cannot_be_bypassed_by_disabling_recovery(tmp_path, monkeypatch):
+def test_incomplete_journal_stops_automatic_recovery(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
-    (root.parent / f".{root.name}.biomero-prune-crash").mkdir()
+    journal = root.parent / f".{root.name}.biomero-prune-crash"
+    journal.mkdir()
+    (journal / "uncommitted-chunk").write_bytes(b"retained")
     monkeypatch.delenv("BIOMERO_RESULT_RECOVERY", raising=False)
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
     monkeypatch.setattr(
         "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
         lambda *a, **k: pytest.fail("read an unrecovered store"))
-    with pytest.raises(ValueError, match="BIOMERO_RESULT_RECOVERY"):
+    with pytest.raises(ValueError, match="Incomplete recovery journal"):
         ImportLifecycleEngine().prepare([root], _options())
 
 

@@ -83,18 +83,13 @@ def _is_zarr(path: Path) -> bool:
 def _require_no_pending_prune(root: Path):
     if next(root.parent.glob(f".{root.name}.biomero-prune-*"), None) is not None:
         raise ValueError(
-            "Interrupted shallow transaction needs recovery; enable "
-            "BIOMERO_RESULT_RECOVERY on storage supporting locks before retrying")
+            "Interrupted shallow transaction needs recovery on storage "
+            "supporting locks before retrying")
 
 
 @contextmanager
 def _recover_result_store(root: Path):
-    """Use legacy preparation when recovery is off or locking is unsupported."""
-    enabled = os.getenv("BIOMERO_RESULT_RECOVERY", "false").strip().lower() == "true"
-    if not enabled:
-        _require_no_pending_prune(root)
-        yield
-        return
+    """Recover automatically, using legacy preparation if locks are unsupported."""
     if root.is_symlink():
         raise ValueError("Cannot normalize a symlinked Zarr store")
     with ExitStack() as stack:

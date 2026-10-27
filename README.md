@@ -31,10 +31,9 @@ Shallow storage is opt-in. Enabling it permits explicit shallow import
 operations; it does not deduplicate every ordinary upload. See the
 [shallow-storage guide](docs/shallow-zarr.md).
 
-Order submission requires a successful database write. Optional
-`BIOMERO_RESULT_RECOVERY=true` locks shallow results and restores interrupted
-prune transactions before inspecting their metadata. Missing, empty or false
-preserves the existing filesystem requirements. See
+Order submission requires a successful database write. Shallow preparation
+automatically locks results and restores interrupted prune transactions before
+inspecting their metadata. No additional feature flag is required. See
 [recovery limits](docs/shallow-zarr.md#interrupted-imports-and-recovery)
 before retrying an order that may already have registered objects.
 An explicit unsupported-lock error uses legacy preparation with a warning;
