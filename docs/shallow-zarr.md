@@ -108,8 +108,12 @@ that reference them. See [storage and preprocessing](storage.md).
 
 ## Interrupted imports and recovery
 
-Recovery is automatic and needs no additional feature flag. Ordinary imports
-without a lifecycle operation are unaffected. Before inspecting a shallow result,
+Recovery is automatic within an explicitly requested shallow lifecycle operation
+and needs no additional feature flag. `BIOMERO_SHALLOW_ZARR=true` is still
+required; disabled shallow operations are rejected before locking or recovery.
+Remote receipts also require `BIOMERO_REMOTE_SHALLOW_ZARR` to remain enabled.
+Ordinary imports without a lifecycle operation are unaffected, even when shallow
+storage is enabled. Before inspecting a shallow result,
 the importer obtains the shared
 shallower filesystem lock and recovers any interrupted prune journal. Recovery
 restores uncommitted pixel moves and metadata before evaluating the store or

@@ -305,8 +305,19 @@ def test_incomplete_journal_stops_automatic_recovery(tmp_path, monkeypatch):
         ImportLifecycleEngine().prepare([root], _options())
 
 
-def test_no_operations_preserve_paths_without_execution(tmp_path):
-    path = tmp_path / "input.tif"
+@pytest.mark.parametrize("shallow_flag", [None, "false", "true"])
+def test_no_operations_preserve_paths_without_execution(
+    tmp_path, monkeypatch, shallow_flag,
+):
+    if shallow_flag is None:
+        monkeypatch.delenv("BIOMERO_SHALLOW_ZARR", raising=False)
+    else:
+        monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", shallow_flag)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle._recover_result_store",
+        Mock(side_effect=AssertionError("ordinary import attempted shallow recovery")),
+    )
+    path = _zarr(tmp_path)
 
     plan = ImportLifecycleEngine().prepare([path], None)
 
@@ -315,8 +326,18 @@ def test_no_operations_preserve_paths_without_execution(tmp_path):
     assert plan.changed is False
 
 
-def test_shallow_operation_is_disabled_by_default(tmp_path, monkeypatch):
-    monkeypatch.delenv("BIOMERO_SHALLOW_ZARR", raising=False)
+@pytest.mark.parametrize("shallow_flag", [None, "false", "FALSE", ""])
+def test_disabled_shallow_operation_cannot_start_recovery(
+    tmp_path, monkeypatch, shallow_flag,
+):
+    if shallow_flag is None:
+        monkeypatch.delenv("BIOMERO_SHALLOW_ZARR", raising=False)
+    else:
+        monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", shallow_flag)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle._recover_result_store",
+        Mock(side_effect=AssertionError("disabled shallow recovery was entered")),
+    )
 
     with pytest.raises(ValueError, match="disabled"):
         ImportLifecycleEngine().prepare([_zarr(tmp_path)], _options())
