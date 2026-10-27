@@ -119,7 +119,10 @@ def submit_import_order(
     # existing import setups and older readers of the event table.
     if envelope.operations:
         normalized["ImportOptions"] = envelope.to_dict()
-    log_order(normalized, STAGE_NEW_ORDER)
+    if not log_order(normalized, STAGE_NEW_ORDER):
+        raise RuntimeError(
+            f"Could not persist import order {normalized['UUID']}"
+        )
     return str(normalized["UUID"])
 
 

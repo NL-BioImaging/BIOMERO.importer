@@ -24,6 +24,11 @@ order_uuid = submit_import_order(order)
 
 Use an existing destination ID appropriate to the data (`Screen` for Plates).
 Submission queues an order; it does not wait for its import to finish.
+The API returns its UUID only after the database writer acknowledges persistence;
+otherwise it raises an error. A lost connection can leave the commit outcome
+uncertain. Inspect the existing UUID before submitting again, and preserve the
+same order identity in your caller's recovery state. The API itself is not an
+idempotent requeue endpoint and does not repair partial OMERO registrations.
 
 ## OME-Zarr channel metadata
 

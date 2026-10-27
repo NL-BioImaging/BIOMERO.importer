@@ -106,6 +106,27 @@ Canonical storage must remain available through the configured shared mounts
 and storage mappings. Deleting or moving the canonical arrays breaks results
 that reference them. See [storage and preprocessing](storage.md).
 
+## Interrupted imports and recovery
+
+Before inspecting a shallow-operation result, the importer obtains the shared
+shallower filesystem lock and recovers any interrupted prune journal. Recovery
+restores uncommitted pixel moves and metadata before evaluating the store or
+reusing its shallow manifest. The same path applies to v2 and v3. The lock remains
+held through normalization and registration-plan preparation; it is released if
+the process dies. Shared storage must provide working filesystem locks.
+
+A busy store, conflicting journal or incomplete recovery fails preparation.
+The importer does not register the incomplete store or reinterpret it as a full
+result. Keep the result and its sibling `.biomero-prune-*` journal for diagnosis;
+do not delete the journal to bypass recovery. Symlinked result roots are rejected.
+
+Filesystem recovery is separate from OMERO registration. An order can fail after
+registering some of its objects, and startup marks interrupted orders failed.
+Review the order's log and registered objects before issuing a replacement.
+These changes do not automatically requeue failed orders or guarantee exactly
+one registration for arbitrary external clients that submit duplicate orders.
+BIOMERO result scripts use a saved order plan to resume polling existing orders.
+
 ## Image and Plate registration
 
 An eligible Image result registers its shallow collection root as the primary

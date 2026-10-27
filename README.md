@@ -31,6 +31,11 @@ Shallow storage is opt-in. Enabling it permits explicit shallow import
 operations; it does not deduplicate every ordinary upload. See the
 [shallow-storage guide](docs/shallow-zarr.md).
 
+Order submission requires a successful database write. Local shallow preparation
+locks each result and recovers interrupted prune transactions before inspecting
+its metadata. See [recovery limits](docs/shallow-zarr.md#interrupted-imports-and-recovery)
+before retrying an order that may already have registered objects.
+
 ## Development
 
 See [development and migrations](docs/development.md) for environment setup,

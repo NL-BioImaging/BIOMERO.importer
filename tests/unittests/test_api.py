@@ -78,7 +78,7 @@ def test_legacy_order_is_submitted_unchanged(monkeypatch):
 
     returned = submit_import_order(
         order,
-        log_order=lambda value, stage: events.append((value, stage)),
+        log_order=lambda value, stage: events.append((value, stage)) or 1,
     )
 
     assert returned == order["UUID"]
@@ -108,7 +108,7 @@ def test_operation_order_is_normalized_and_submitted(monkeypatch):
 
     submit_import_order(
         order,
-        log_order=lambda value, stage: events.append((value, stage)),
+        log_order=lambda value, stage: events.append((value, stage)) or 1,
     )
 
     assert events[0][0]["ImportOptions"]["schema"] == 2
@@ -131,3 +131,9 @@ def test_operation_order_reports_missing_identity_extra(monkeypatch):
         match=r"install biomero-importer\[identity\]",
     ):
         submit_import_order(order, log_order=lambda *_: None)
+
+
+@pytest.mark.parametrize("result", [None, False, 0])
+def test_submission_requires_a_durable_database_acknowledgement(result):
+    with pytest.raises(RuntimeError, match="persist"):
+        submit_import_order(_order(), log_order=lambda *_: result)

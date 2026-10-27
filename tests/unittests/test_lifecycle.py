@@ -29,6 +29,8 @@ from biomero_importer.utils.result_zarr import (
     NormalizedShallowResult,
     ReturnedZarrDecision,
 )
+from biomero_shallower.operations import locked
+from biomero_shallower.transaction import begin
 
 
 WORKFLOW_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -114,6 +116,68 @@ def _zarr(tmp_path):
     (root / ".zattrs").write_text("{}", encoding="utf-8")
     (root / "labels" / "nuclei").mkdir(parents=True)
     return root
+
+
+@pytest.mark.parametrize("metadata_name", [".zattrs", "zarr.json"])
+def test_interrupted_pruning_is_recovered_before_reading_store(
+    tmp_path, monkeypatch, metadata_name,
+):
+    root = _zarr(tmp_path)
+    (root / ".zattrs").unlink()
+    metadata = root / metadata_name
+    original_metadata = b'{"original": true}'
+    metadata.write_bytes(original_metadata)
+    pixels = root / "0"
+    pixels.mkdir()
+    (pixels / "chunk").write_bytes(bytes(range(256)))
+    rollback = root.parent / f".{root.name}.biomero-prune-crash"
+    rollback.mkdir()
+    begin(root, rollback, [pixels], {metadata: original_metadata})
+    pixels.rename(rollback / "0")
+    metadata.write_text('{"partial": true}', encoding="utf-8")
+    (root / ".biomero-shallow.json").write_text("incomplete", encoding="utf-8")
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+
+    def evaluate(*args, **kwargs):
+        assert (pixels / "chunk").read_bytes() == bytes(range(256))
+        assert metadata.read_bytes() == original_metadata
+        assert not rollback.exists()
+        assert not (root / ".biomero-shallow.json").exists()
+        return ReturnedZarrDecision(
+            store_path=root, outcome="keep-full", reason="different-pixels")
+
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr", evaluate)
+    plan = ImportLifecycleEngine().prepare([root], _options())
+    assert plan.items[0].path == root
+
+
+def test_conflicting_recovery_journal_blocks_registration(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    pixels = root / "0"
+    pixels.mkdir()
+    rollback = root.parent / f".{root.name}.biomero-prune-crash"
+    rollback.mkdir()
+    begin(root, rollback, [pixels], {})
+    (rollback / "0").mkdir()
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: pytest.fail("read an unrecovered store"))
+    with pytest.raises(ValueError, match="Conflicting recovery"):
+        ImportLifecycleEngine().prepare([root], _options())
+    assert pixels.exists() and (rollback / "0").exists()
+
+
+def test_busy_store_is_not_evaluated_or_modified(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: pytest.fail("read a concurrently modified store"))
+    with locked(root):
+        with pytest.raises((ValueError, OSError)):
+            ImportLifecycleEngine().prepare([root], _options())
 
 
 def test_no_operations_preserve_paths_without_execution(tmp_path):
