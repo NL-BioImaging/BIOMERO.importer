@@ -19,7 +19,8 @@ def source(data, pixel_type):
     """Model OMERO's big-endian wire bytes and gateway's decoded plane API."""
     from omero.gateway import PixelsWrapper
 
-    state = {"positions": [], "closed": False, "opened": 0, "closed_count": 0}
+    state = {"positions": [], "tiles": [], "closed": False,
+             "opened": 0, "closed_count": 0}
 
     class Store:
         def __init__(self):
@@ -29,8 +30,14 @@ def source(data, pixel_type):
             pass
 
         def getPlane(self, z, c, t):
+            raise AssertionError("Whole-plane RPC must not be used")
+
+        def getTile(self, z, c, t, x, y, width, height):
             state["positions"].append((z, c, t))
-            return data[t, c, z].astype(data.dtype.newbyteorder(">")).tobytes()
+            state["tiles"].append((x, y, width, height))
+            assert width * height * data.dtype.itemsize <= 256 * 1024
+            tile = data[t, c, z, y:y + height, x:x + width]
+            return tile.astype(data.dtype.newbyteorder(">")).tobytes()
 
         def close(self):
             state["closed"] = True
@@ -113,8 +120,8 @@ def test_omero_identity_matches_bioio_for_wire_pixels(
                                   for c in range(2) for t in range(2)]
     assert state["closed"]
     assert state["opened"] == state["closed_count"] == 8
-    assert "omero-gateway-v1" in original.imagewalk_revision
-    assert "omero-gateway-v1" not in exported.imagewalk_revision
+    assert "omero-gateway-tiles-v1" in original.imagewalk_revision
+    assert "omero-gateway-tiles-v1" not in exported.imagewalk_revision
     assert provider.generate(root, **semantics(data)) == exported
 
     data[0, 0, 0, 0, 0] += 1
@@ -134,7 +141,7 @@ def test_omero_plane_read_fails_closed_and_closes_iterator(failure):
 
     def broken(positions):
         try:
-            _z, c, _t = list(positions)[0]
+            _z, c, _t, _tile = list(positions)[0]
             if c == 0:
                 yield data[0, 0, 0]
                 return
@@ -151,7 +158,7 @@ def test_omero_plane_read_fails_closed_and_closes_iterator(failure):
         finally:
             state["closed"] = True
 
-    pixels.getPlanes = broken
+    pixels.getTiles = broken
     with pytest.raises((identity.PixelIdentityError, OSError)):
         identity.IsccBioIdentityProvider().generate_omero(
             connection, image_id=17, **semantics(data))
@@ -166,14 +173,14 @@ def test_gateway_raw_read_failure_closes_store():
 
     def prepare_with_later_read_failure():
         store = prepare()
-        read = store.getPlane
+        read = store.getTile
 
-        def fail_second_channel(z, c, t):
+        def fail_second_channel(z, c, t, *region):
             if c == 1:
                 raise OSError("socket dropped")
-            return read(z, c, t)
+            return read(z, c, t, *region)
 
-        store.getPlane = fail_second_channel
+        store.getTile = fail_second_channel
         return store
 
     pixels._prepareRawPixelsStore = prepare_with_later_read_failure

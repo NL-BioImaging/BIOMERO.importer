@@ -15,6 +15,43 @@ from biomero_shallower.pixel_identity import (
 )
 
 
+# Leave room for Ice protocol overhead even with a 1 MiB message limit.
+_MAX_TILE_BYTES = 256 * 1024
+_MAX_TILE_SIDE = 512
+
+
+def _tile_regions(size_y, size_x, dtype):
+    """Cover a plane with bounded, non-overlapping OMERO tile requests."""
+    max_pixels = _MAX_TILE_BYTES // dtype.itemsize
+    width = min(size_x, _MAX_TILE_SIDE, max_pixels)
+    height = min(size_y, _MAX_TILE_SIDE, max_pixels // width)
+    for y in range(0, size_y, height):
+        for x in range(0, size_x, width):
+            yield x, y, min(width, size_x - x), min(height, size_y - y)
+
+
+def _read_gateway_tile(pixels, z, c, t, region, dtype):
+    # Fully exhaust each request before validation/hashing. Gateway getTiles
+    # closes its store after iteration, not in finally: closing a suspended
+    # multi-tile generator on an error can leak that store.
+    with closing(pixels.getTiles([(z, c, t, region)])) as tiles:
+        decoded = list(tiles)
+    if len(decoded) != 1:
+        # Some gateway versions log/swallow read errors. Never hash an
+        # incomplete stream, or silently accept an unexpected extra tile.
+        raise PixelIdentityError(
+            f"Expected one OMERO Image tile at Z={z}, C={c}, T={t}, "
+            f"region={region}; received {len(decoded)}"
+        )
+    array = np.asarray(decoded[0])
+    _x, _y, width, height = region
+    if array.shape != (height, width):
+        raise PixelIdentityError("OMERO Image tile shape mismatch")
+    if array.dtype.name != dtype.name:
+        raise PixelIdentityError("OMERO Image tile dtype mismatch")
+    return array
+
+
 def _gateway_planes(image, plane_type):
     """Yield complete decoded OMERO planes in IMAGEWALK Z/C/T order.
 
@@ -28,30 +65,19 @@ def _gateway_planes(image, plane_type):
     )
     if min(size_z, size_c, size_t, size_y, size_x) < 1:
         raise PixelIdentityError("OMERO Image dimensions must be positive")
-    expected_dtype = np.dtype(pixels.get_numpy_type()).name
+    dtype = np.dtype(pixels.get_numpy_type())
 
     def positions():
         return ((z, c, t) for z in range(size_z)
                 for c in range(size_c) for t in range(size_t))
 
     for z, c, t in positions():
-        # Fully exhaust one bounded request before hashing. Gateway getTiles
-        # closes its store after iteration, not in finally: closing a suspended
-        # multi-plane generator on a hashing error can leak that store.
-        with closing(pixels.getPlanes([(z, c, t)])) as planes:
-            decoded = list(planes)
-        if len(decoded) != 1:
-            # Some gateway versions log/swallow read errors. Never hash an
-            # incomplete stream, or silently accept an unexpected extra plane.
-            raise PixelIdentityError(
-                f"Expected one OMERO Image plane at Z={z}, C={c}, T={t}; "
-                f"received {len(decoded)}"
-            )
-        array = np.asarray(decoded[0])
-        if array.shape != (size_y, size_x):
-            raise PixelIdentityError("OMERO Image plane shape mismatch")
-        if array.dtype.name != expected_dtype:
-            raise PixelIdentityError("OMERO Image plane dtype mismatch")
+        # Keep the upstream full-plane hashing contract; bound the Ice replies.
+        array = np.empty((size_y, size_x), dtype=dtype, order="C")
+        for region in _tile_regions(size_y, size_x, dtype):
+            x, y, width, height = region
+            tile = _read_gateway_tile(pixels, z, c, t, region, dtype)
+            array[y:y + height, x:x + width] = tile
         yield plane_type(array, 0, z, c, t)
 
 
@@ -64,7 +90,7 @@ def _generate_gateway_identity(connection, image_id, tool_version):
     with closing(_gateway_planes(image, plane_type)) as planes:
         parts = generate(planes)
     return {
-        "generator": f"iscc-bio - v{tool_version}; omero-gateway-v1",
+        "generator": f"iscc-bio - v{tool_version}; omero-gateway-tiles-v1",
         "parts": parts,
     }
 
