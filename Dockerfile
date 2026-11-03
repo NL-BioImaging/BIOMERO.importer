@@ -4,6 +4,15 @@ FROM continuumio/miniconda3:25.3.1-1
 # Set the working directory in the container
 WORKDIR /auto-importer
 
+# Repair pip's bundled trust store before downloading packages, then use the
+# repaired certifi bundle for the first Conda transaction (including libmamba).
+# https://discuss.python.org/t/109576
+ARG PIP_BOOTSTRAP="pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+RUN /opt/conda/bin/python -m pip install --no-cache-dir "$PIP_BOOTSTRAP" && \
+    /opt/conda/bin/python -m pip install --no-cache-dir --upgrade 'certifi>=2026.10.19' && \
+    CONDA_SSL_VERIFY="$(/opt/conda/bin/python -m certifi)" conda install -n base -y \
+        'python>=3.13.18,<3.14' 'pip>=26.2.2' 'certifi>=2026.10.19' 'ca-certificates>=2026.10.20'
+
 # Create a Conda environment
 RUN conda create -n auto-import-env python=3.12 -y
 
@@ -13,12 +22,17 @@ RUN conda install -n auto-import-env -c conda-forge omero-py -y && \
     conda install -n auto-import-env -c conda-forge psycopg2 libffi==3.4.4 -y && \
     conda install -n auto-import-env -c conda-forge intel-openmp=2019.4 -y
 
+# Enforce security floors after the application dependencies have been solved.
+RUN conda install -n auto-import-env -y \
+    'python>=3.12.16,<3.13' 'pip>=26.2.2' 'certifi>=2026.10.19' 'ca-certificates>=2026.10.20'
+
 # Activate the environment by setting the path to environment's bin directory
 ENV PATH /opt/conda/envs/auto-import-env/bin:$PATH
 
 # Install git and system prerequisites for building PostgreSQL drivers
 # And for podman in podman
 RUN apt-get update && apt-get install -y \
+    ca-certificates \
     git \
     python3-dev \
     libpq-dev \
@@ -119,6 +133,11 @@ RUN if [ -n "$BIOMERO_IMPORTER_VERSION" ]; then \
     else \
         SETUPTOOLS_SCM_PRETEND_VERSION_FOR_BIOMERO_IMPORTER=0.0.0 pip install '/auto-importer[identity]'; \
     fi
+
+# Fail the build if subsequent dependency installation regresses either environment.
+RUN set -eu; for py in /opt/conda/bin/python /opt/conda/envs/auto-import-env/bin/python; do \
+        "$py" -c "import sys; from importlib.metadata import version; from packaging.version import Version; assert sys.version_info[:3] >= {(3, 12): (3, 12, 16), (3, 13): (3, 13, 18)}[sys.version_info[:2]]; assert Version(version('pip')) >= Version('26.2.2'); assert Version(version('certifi')) >= Version('2026.10.19')"; \
+    done && python -m pip check
 
 # Make the logs directory
 RUN mkdir -p /auto-importer/logs
