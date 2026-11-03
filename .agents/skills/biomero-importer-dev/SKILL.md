@@ -1,6 +1,6 @@
 ---
 name: biomero-importer-dev
-description: Develop and test BIOMERO.importer, including OMERO in-place registration, preprocessing, ingestion tracking, Zarr handling, and package or Docker dependency updates.
+description: Develop and test BIOMERO.importer, including OMERO in-place registration, preprocessing, ingestion tracking, Zarr handling, and package or Docker dependency updates. Also use when drafting component release notes.
 ---
 
 # BIOMERO.importer Development
@@ -104,3 +104,9 @@ decisions about defaults and rollout scope.
   because worker processes may cache imported modules.
 - Finish an authorized development step with a focused commit and follow the
   pull-request branch workflow above for publication and CI.
+
+## Release notes
+
+Before drafting a stable or beta release body, read the current
+[shared component release-note guide](https://github.com/NL-BioImaging/NL-BIOMERO/blob/master/.agents/skills/omero-biomero-expert/references/component-release-notes.md).
+Keep the format in that single source; do not copy it into this repository.
