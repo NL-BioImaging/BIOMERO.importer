@@ -29,25 +29,6 @@ The calling process can check `get_importer_capabilities()` before submitting
 an order. This describes that process's installed dependencies and environment;
 it does not query a remote importer service. Keep their configuration aligned.
 
-### OMERO pixel identity compatibility
-
-Fresh-export verification reads OMERO pixels through the gateway's decoded
-plane API, then applies ISCC-BIO's existing IMAGEWALK hashing. This avoids the
-native-endian decoding defect in ISCC-BIO 0.2.0's OMERO reader, which can reject
-an otherwise identical export of multi-byte pixels on little-endian workers.
-The adapter verifies plane count, shape and dtype and fails on incomplete
-reads. Exact Instance Code and semantic comparisons remain required.
-
-OMERO identities record the reader revision `omero-gateway-v1`; filesystem
-identities and their codes are unchanged. Install the corrected
-`biomero-importer[identity]` package in the **processor/biomeroworker runtime**
-that executes the export scripts as well as the importer service, and restart
-those processes after updating. Updating only the importer service image does
-not update the package inside an existing processor image. Coordinate consumer
-dependency minimums and image pins after publishing the corrected package.
-Validate a fresh export; reuse of an existing canonical store does not exercise
-the corrected OMERO reader.
-
 ## Choose where shallowing runs
 
 | Route | Shallowing | Importer responsibility |
