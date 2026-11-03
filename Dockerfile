@@ -19,7 +19,7 @@ RUN conda create -n auto-import-env python=3.12 -y
 # Install omero-py, bftools, and psycopg2 using Conda
 RUN conda install -n auto-import-env -c conda-forge omero-py -y && \
     conda install -n auto-import-env -c bioconda bftools -y && \
-    conda install -n auto-import-env -c conda-forge psycopg2 libffi==3.4.4 -y && \
+    conda install -n auto-import-env -c conda-forge psycopg2 'libffi>=3.4.8,<3.5' -y && \
     conda install -n auto-import-env -c conda-forge intel-openmp=2019.4 -y
 
 # Enforce security floors after the application dependencies have been solved.
