@@ -142,6 +142,18 @@ not each image; historical data is considered only when explicitly retried.
 Filesystem recovery is separate from OMERO registration. An order can fail after
 registering some of its objects, and startup marks interrupted orders failed.
 Review the order's log and registered objects before issuing a replacement.
+Import provenance is mandatory: a file is successful only after its registered
+objects have the import-order annotation. Sessions stay alive through registration
+and postprocessing. If annotation access fails, the importer makes up to three
+annotation-only attempts, reconnecting as the original user in the original
+group and reusing the exact registered IDs. A write whose response was lost is
+accepted only after all expected provenance fields are found on the linked
+annotation. Conflicting or incomplete provenance fails the import.
+
+If these attempts fail, the order is marked failed and its description records
+the registered object type and IDs. Preserve that event and repair those objects;
+do not rerun registration to repair annotations. This bounded metadata recovery
+does not make arbitrary resubmission of a failed or interrupted order safe.
 These changes do not automatically requeue failed orders or guarantee exactly
 one registration for arbitrary external clients that submit duplicate orders.
 BIOMERO result scripts use a saved order plan to resume polling existing orders.
