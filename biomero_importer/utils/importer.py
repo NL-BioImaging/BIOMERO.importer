@@ -11,8 +11,10 @@ from importlib import import_module
 from pathlib import PurePath
 from threading import Event, Thread
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import ezomero
+import yaml
 from omero.gateway import BlitzGateway
 from omero.rtypes import rstring, rlong
 from omero.cli import CLI
@@ -32,6 +34,7 @@ IMPORT_RETRY_DELAY = 10  # Delay between import retries (in seconds)
 PODMAN_RUN_MAX_ATTEMPTS = 3  # Bounded retries for transient bind setup failures
 PODMAN_RUN_RETRY_DELAY = 2  # Initial retry delay, doubled after each failure
 OMERO_KEEPALIVE_SECONDS = 60
+ANNOTATION_MAX_ATTEMPTS = 3
 TMP_OUTPUT_FOLDER = "OMERO_inplace"
 PROCESSED_DATA_FOLDER = os.getenv(
     "PROCESSED_DATA_FOLDER",
@@ -204,7 +207,11 @@ def connection(func):
                     group_id = ezomero.get_group_id(
                         root_conn, group_name)  # grab w/ ezomero
                     self.logger.debug(f"Using TTL: {self.ttl_for_user_conn}")
-                    with root_conn.suConn(intended_username, ttl=self.ttl_for_user_conn) as user_conn:
+                    with root_conn.suConn(intended_username, ttl=self.ttl_for_user_conn) as user_conn, omero_connection_keepalive(
+                        (("root", root_conn), ("user", user_conn)),
+                        self.logger,
+                        func.__name__,
+                    ):
                         user_conn.keepAlive()
                         self.logger.debug(
                             f"Connected as user {intended_username}")
@@ -610,9 +617,11 @@ class DataPackageImporter:
             raise ValueError("Missing OMERO connection environment variables.")
 
         self.imported = False
+        self._registration_started = False
+        self._registered_objects = []
 
     @connection
-    def import_to_omero(self, conn, file_path, target_id, target_type, uuid, transfer_type="ln_s", depth=None, log_id=None):
+    def import_to_omero(self, conn, file_path, target_id, target_type, uuid, transfer_type="ln_s", depth=None, log_id=None, return_image_ids=False):
         log_id = log_id or uuid
         self.logger.debug(
             f"Starting import to OMERO for file: {file_path}, Target: {target_id} ({target_type})")
@@ -655,11 +664,40 @@ class DataPackageImporter:
         else:
             raise ValueError(
                 "Invalid target_type. Must be 'Screen' or 'Dataset'.")
+        if return_image_ids:
+            arguments.extend(['--output', 'yaml'])
+            # Read IDs only from this invocation, never an older log or a
+            # Dataset/path query that could include historical imports.
+            id_output = f"logs/cli.{log_id}.{uuid4().hex}.ids.yaml"
+            with open(id_output, 'x'):
+                pass
+            arguments[arguments.index('--file') + 1] = id_output
+            self.logger.info("Recording exact CLI Image IDs in %s", id_output)
         arguments.append(str(file_path))
         cli.invoke(arguments)
         if cli.rv == 0:
             self.imported = True
             self.logger.info(f'Imported successfully for {str(file_path)}')
+            if return_image_ids:
+                with open(id_output) as output:
+                    results = yaml.safe_load(output)
+                image_ids = []
+                if isinstance(results, list):
+                    for result in results:
+                        if not isinstance(result, dict):
+                            raise ValueError(f"Invalid OMERO CLI ID output: {id_output}")
+                        ids = result.get('Image', [])
+                        if (not isinstance(ids, list)
+                                or any(type(value) is not int or value <= 0
+                                       for value in ids)):
+                            raise ValueError(f"Invalid OMERO CLI Image IDs: {id_output}")
+                        image_ids.extend(ids)
+                if not image_ids:
+                    raise RuntimeError(
+                        f"Dataset {target_id} import returned no exact Image "
+                        f"IDs; reconcile {id_output} before retrying"
+                    )
+                return list(dict.fromkeys(image_ids))
             return True
         else:
             self.imported = False
@@ -960,6 +998,7 @@ class DataPackageImporter:
 
         successful_uploads = []
         failed_uploads = []
+        self._registration_started = True
         self.logger.debug(f"Uploading files: {file_paths}")
         upload_target = dataset_id or screen_id
         pre_processing = local_paths is not None
@@ -967,6 +1006,10 @@ class DataPackageImporter:
         for i, file_path in enumerate(file_paths):
             self.logger.debug(f"Uploading file: {file_path}")
             zarr_is_plate = False  # Track if ZARR import created a plate
+            is_zarr = False
+            image_ids = None
+            registered_ids = []
+            object_type = "Plate" if screen_id else "Image"
             try:
                 if pre_processing:  # pre-processing
                     local_path = local_paths[i]  # TODO: assumes 1:1 local_paths and file_paths
@@ -978,6 +1021,7 @@ class DataPackageImporter:
                         full_path = result_entry[PREPROC_RESULT_LOCAL_FULL]
                         self.logger.debug(f"Importing {full_path}")
                         image_ids, zarr_is_plate = self.import_zarr(
+                            conn,
                             uri=str(full_path),
                             target=upload_target
                         )
@@ -1013,15 +1057,15 @@ class DataPackageImporter:
                                 self.logger.debug(f"EZimport returned ids {image_ids} for {str(file_path)} ({dataset_id})")
                             else:
                                 log_id = f"{uuid}_{i}"
-                                imported = self.import_to_omero(
+                                image_ids = self.import_to_omero(
                                     file_path=local_path,
                                     target_id=dataset_id,
                                     target_type='Dataset',
                                     uuid=uuid,
                                     depth=10,
-                                    log_id=log_id
+                                    log_id=log_id,
+                                    return_image_ids=True,
                                 )
-                                image_ids = dataset_id
 
                             # Get the OMERO storage path for datasets
                             _, local_file_dir = self.get_image_paths(str(local_path), dataset_id)
@@ -1080,6 +1124,7 @@ class DataPackageImporter:
                     is_zarr = '.zarr' in file_path.lower() or 'zar' in os.path.splitext(file_path)[1].lower()
                     if is_zarr and self.use_register_zarr:
                         image_ids, zarr_is_plate = self.import_zarr(
+                            conn,
                             uri=str(file_path),
                             target=upload_target
                         )
@@ -1107,16 +1152,15 @@ class DataPackageImporter:
                                 self.logger.debug(f"EZimport returned ids {image_ids} for {str(file_path)} ({dataset_id})")
                             elif os.path.isdir(file_path):
                                 log_id = f"{uuid}_{i}"
-                                imported = self.import_to_omero(
+                                image_ids = self.import_to_omero(
                                     file_path=str(file_path),
                                     target_id=dataset_id,
                                     target_type='Dataset',
                                     uuid=uuid,
                                     depth=10,
-                                    log_id=log_id
+                                    log_id=log_id,
+                                    return_image_ids=True,
                                 )
-                                image_ids = dataset_id
-                                self.logger.debug(f"Set ids {image_ids} to the dataset {dataset_id}")
                             else:
                                 raise ValueError(
                                     f"{file_path} is not recognized as file or directory.")
@@ -1131,24 +1175,24 @@ class DataPackageImporter:
                     # Selecting 1 id, because this is a for-loop over files.
                     # This means we should only be getting back 1 ID per single upload.
                     self.logger.debug(f"Postprocessing ids {image_ids}: max ID = {image_or_plate_id}")
-                    try:
-                        # Determine if we're dealing with a plate:
-                        # Either we imported to a screen, or ZARR created a plate
-                        is_plate_object = zarr_is_plate if is_zarr else bool(screen_id)
-                        self.add_image_annotations(
+                    is_plate_object = zarr_is_plate if is_zarr and self.use_register_zarr else bool(screen_id)
+                    object_type = "Plate" if is_plate_object else "Image"
+                    registered_ids = list(image_ids) if isinstance(image_ids, list) else [image_ids]
+                    self._registered_objects.append(
+                        f"{object_type} IDs: {registered_ids} ({file_path})"
+                    )
+                    for registered_id in registered_ids:
+                        self.ensure_import_annotations(
                             conn,
-                            image_or_plate_id,
+                            registered_id,
                             uuid,
                             file_path,
                             is_screen=is_plate_object,
                             local_path=local_path,
                         )
 
-                        self.logger.info(
-                            f"Uploaded file: {file_path} to target: {upload_target} with ID: {image_or_plate_id}")
-                    except Exception as annotation_error:
-                        self.logger.error(
-                            f"Annotation failed for {file_path}: {annotation_error}")
+                    self.logger.info(
+                        f"Uploaded file: {file_path} to target: {upload_target} with ID: {image_or_plate_id}")
                     successful_uploads.append(
                         (file_path, upload_target, os.path.basename(file_path), image_or_plate_id))
                 else:
@@ -1158,8 +1202,42 @@ class DataPackageImporter:
                         (file_path, upload_target, os.path.basename(file_path), None))
             except Exception as e:
                 self.logger.error(f"Error uploading file {file_path}: {e}")
+                if not registered_ids:
+                    # Registration can succeed before symlink/path processing
+                    # fails. Retain its returned IDs even before annotation.
+                    ids = image_ids if isinstance(image_ids, list) else [image_ids]
+                    if ids and all(type(value) is int and value > 0 for value in ids):
+                        registered_ids = ids
+                        is_plate_object = zarr_is_plate if is_zarr and self.use_register_zarr else bool(screen_id)
+                        object_type = "Plate" if is_plate_object else "Image"
+                        self._registered_objects.append(
+                            f"{object_type} IDs: {registered_ids} ({file_path})"
+                        )
+                if registered_ids:
+                    # The failed ingestion event persists these exact IDs. Never
+                    # retry registration to repair post-registration metadata.
+                    detail = (
+                        f"Post-registration processing failed for {file_path}; "
+                        f"registered {object_type} IDs: {registered_ids}. "
+                        f"Repair these objects; do not reimport. Error: {e}"
+                    )
+                    previous = self.data_package.get('Description')
+                    self.data_package['Description'] = (
+                        f"{previous}\n{detail}" if previous else detail
+                    )
+                else:
+                    detail = (
+                        f"Import failed for {file_path} targeting "
+                        f"{'Screen' if screen_id else 'Dataset'} {upload_target}. "
+                        f"Reconcile any registered objects before retrying: {e}"
+                    )
+                    previous = self.data_package.get('Description')
+                    self.data_package['Description'] = (
+                        f"{previous}\n{detail}" if previous else detail
+                    )
                 failed_uploads.append(
-                    (file_path, upload_target, os.path.basename(file_path), None))
+                    (file_path, upload_target, os.path.basename(file_path),
+                     max(registered_ids) if registered_ids else None))
         return successful_uploads, failed_uploads
 
     def upload_prepared_plan(
@@ -1230,8 +1308,33 @@ class DataPackageImporter:
             self.logger.error(f"Rename failed for Image {image_id}: {e}")
             return False
 
+    def ensure_import_annotations(self, conn, object_id, uuid, file_path,
+                                  is_screen=False, local_path=None):
+        """Retry only provenance, on the exact object already registered."""
+        for attempt in range(ANNOTATION_MAX_ATTEMPTS):
+            try:
+                kwargs = dict(
+                    object_id=object_id, uuid=uuid, file_path=file_path,
+                    is_screen=is_screen, local_path=local_path,
+                )
+                # Later attempts open a fresh session using the original
+                # order's user and group. The decorator closes it afterward.
+                if attempt == 0:
+                    return self.add_image_annotations(conn, **kwargs)
+                return self.add_image_annotations(**kwargs)
+            except Exception:
+                if attempt + 1 == ANNOTATION_MAX_ATTEMPTS:
+                    raise
+                self.logger.warning(
+                    "Provenance attempt %s failed for object %s; reconnecting "
+                    "to reconcile metadata without repeating registration",
+                    attempt + 1, object_id, exc_info=True,
+                )
+                time.sleep(RETRY_DELAY)
+
     @connection
     def add_image_annotations(self, conn, object_id, uuid, file_path, is_screen=False, local_path=None):
+        object_type = "Plate" if is_screen else "Image"
         try:
             annotation_dict = {'UUID': str(uuid), 'Filepath': str(file_path)}
             
@@ -1310,6 +1413,27 @@ class DataPackageImporter:
             
             self.logger.debug(f"Full annotation dict: {annotation_dict}")
             self.logger.info(f"Adding {len(annotation_dict)} metadata fields to {object_type} {object_id}")
+
+            obj = conn.getObject(object_type, object_id)
+            if obj is None:
+                raise RuntimeError(f"Registered {object_type} {object_id} is unavailable")
+            for annotation in obj.listAnnotations(ns=ns):
+                values = dict(annotation.getValue())
+                if (values.get('UUID') == str(uuid)
+                        and values.get('Filepath') == str(file_path)):
+                    # A response may be lost after the server committed the
+                    # annotation. Reuse it only when all provenance agrees.
+                    if (values.get('Import_Timestamp')
+                            and all(values.get(key) == value
+                                    for key, value in annotation_dict.items()
+                                    if key != 'Import_Timestamp')):
+                        annotation_id = annotation.getId()
+                        if annotation_id:
+                            return annotation_id
+                    raise RuntimeError(
+                        f"Existing provenance for {object_type} {object_id} "
+                        "does not match this import order"
+                    )
             
             map_ann_id = ezomero.post_map_annotation(
                 conn=conn,
@@ -1322,12 +1446,14 @@ class DataPackageImporter:
             if map_ann_id:
                 self.logger.info(
                     f"Annotations added to {object_type} ID: {object_id}. MapAnnotation ID: {map_ann_id}")
+                return map_ann_id
             else:
-                self.logger.warning(
-                    f"Annotations created for {object_type} ID: {object_id}, but no ID returned.")
+                raise RuntimeError(
+                    f"No annotation ID returned for {object_type} {object_id}")
         except Exception as e:
             self.logger.error(
                 f"Failed to add annotations to {object_type} ID: {object_id}: {e}")
+            raise
 
     @connection
     def create_new_dataset(self, conn, name="New Dataset", description=""):
@@ -1377,7 +1503,11 @@ class DataPackageImporter:
                         root_conn.keepAlive()
                         group_id = ezomero.get_group_id(
                             root_conn, group_name)  # grab w/ ezomero
-                        with root_conn.suConn(intended_username, ttl=self.ttl_for_user_conn) as user_conn:
+                        with root_conn.suConn(intended_username, ttl=self.ttl_for_user_conn) as user_conn, omero_connection_keepalive(
+                            (("root", root_conn), ("user", user_conn)),
+                            self.logger,
+                            "registration and postprocessing",
+                        ):
                             if not user_conn:
                                 self.logger.error(
                                     f"Failed to connect as user {intended_username}")
@@ -1589,7 +1719,8 @@ class DataPackageImporter:
 
                 except Exception as e:
                     # TODO: can we use this decorator instead? no?
-                    if "connect" in str(e).lower():
+                    if ("connect" in str(e).lower()
+                            and not self._registration_started):
                         retry_count += 1
                         self.logger.error(
                             f"Connection issue (attempt {retry_count}/"
@@ -1602,10 +1733,22 @@ class DataPackageImporter:
                     msg = f"Error during import: {e}"
                     self.logger.error(msg, exc_info=True)
                     # Simplified message for DB
-                    self.data_package['Description'] = (
-                        "Import failed. Please retry; if it repeats, "
-                        "contact admin."
-                    )
+                    if self._registration_started:
+                        detail = (
+                            "Import interrupted after registration began. "
+                            "Reconcile existing objects; do not reimport. "
+                            "Known registered objects: "
+                            + ("; ".join(self._registered_objects) or "unknown")
+                        )
+                        previous = self.data_package.get('Description')
+                        self.data_package['Description'] = (
+                            f"{previous}\n{detail}" if previous else detail
+                        )
+                    elif not self.data_package.get('Description'):
+                        self.data_package['Description'] = (
+                            "Import failed. Please retry; if it repeats, "
+                            "contact admin."
+                        )
                     return [], [], True
 
             self.logger.error(
