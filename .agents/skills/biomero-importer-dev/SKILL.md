@@ -79,6 +79,22 @@ Add regression coverage at the lowest useful layer, while ensuring the
 production call path uses the tested helper. Record any environment-caused
 test limitation separately from assertion failures.
 
+## Documentation and compatibility
+
+Write feature guides for current behavior, usage and configuration. Put
+version-specific upgrade, restart and deployment instructions in dedicated
+upgrade documentation or release notes, linking from feature guides when
+needed. Keep investigation history, validation evidence, merge order and
+cross-repository release coordination in pull requests. Contributor workflows
+belong in development documentation. Review changed documentation for its
+intended reader; do not add a deployment narrative merely because a bug was fixed.
+
+Backward compatibility means keeping supported interfaces and workflows working
+in existing deployments. Make corrective fixes effective there; do not preserve
+a known bug as the default or require a new opt-in solely for compatibility.
+New optional behavior may need a configuration gate. Honor explicit user
+decisions about defaults and rollout scope.
+
 ## Repository and deployment notes
 
 - The default integration branch is `main`; confirm the remote default before
