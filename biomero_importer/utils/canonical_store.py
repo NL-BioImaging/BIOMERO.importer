@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import errno
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -367,6 +368,12 @@ def cache_refreshed_inputs(expected, refreshed_inputs, storage_roots):
             updated = previous.plate_source.model_copy(update={"images": tuple(
                 image.model_copy(update={"source": current_sources[image.image_node_path]})
                 for image in previous.plate_source.images)})
-        write_indexed_canonical_marker(path, updated)
+        try:
+            write_indexed_canonical_marker(path, updated)
+        except OSError:
+            logging.getLogger(__name__).warning(
+                "Could not persist optional comparison metadata for %s; "
+                "continuing with the validated result", path, exc_info=True)
+            continue
         written += 1
     return written

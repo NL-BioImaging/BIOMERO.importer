@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 
 import numpy as np
@@ -213,7 +214,7 @@ def test_reads_nested_zarr_without_filesystem_alias(tmp_path, monkeypatch, relat
     root = tmp_path / "plate.zarr"
     make_pixels(root, "A/1/0")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(pixel_identity.os, "symlink", lambda *a, **k: pytest.fail("No alias required"))
+    monkeypatch.setattr(os, "symlink", lambda *a, **k: pytest.fail("No alias required"))
     calls = []
 
     def generate(planes):

@@ -99,7 +99,10 @@ def test_full_fallback_can_normalize_locally_and_retry(tmp_path, monkeypatch):
     assert first.items == retry.items
 
 
-def test_kept_full_receipt_refreshes_source_cache_without_repeating_comparison(tmp_path, monkeypatch):
+@pytest.mark.parametrize('cache_writable', [True, False])
+def test_kept_full_receipt_refreshes_source_cache_without_repeating_comparison(
+        tmp_path, monkeypatch, caplog, cache_writable):
+    from contextlib import nullcontext
     from biomero_importer.utils.canonical_store import load_canonical_marker
     from pathlib import Path
     root = tmp_path / 'result.zarr'
@@ -130,9 +133,17 @@ def test_kept_full_receipt_refreshes_source_cache_without_repeating_comparison(t
         reportSha256=hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest())
     options = ImportOptionsEnvelope(operations=(ShallowZarrImportOperation(
         canonicalInputs=manifest, remoteReceipts=(receipt,)),))
-    with patch('biomero_importer.utils.lifecycle.evaluate_returned_zarr', side_effect=AssertionError('rehash')), \
+    cache_write = (nullcontext() if cache_writable else patch(
+        'biomero_importer.utils.canonical_store.write_indexed_canonical_marker',
+        side_effect=PermissionError('read-only metadata directory')))
+    with cache_write, \
+         patch('biomero_importer.utils.lifecycle.evaluate_returned_zarr', side_effect=AssertionError('rehash')), \
          patch('biomero_importer.utils.lifecycle.load_managed_storage_roots', return_value={'group-0-data': tmp_path}):
         prepared = ImportLifecycleEngine().prepare([root], options)
     assert [item.role for item in prepared.items] == ['primary', 'image-label']
-    assert load_canonical_marker(original).pixel_identity.instance_code == 'ISCC:ISOURCE'
+    if cache_writable:
+        assert load_canonical_marker(original).pixel_identity.instance_code == 'ISCC:ISOURCE'
+    else:
+        assert load_canonical_marker(original) is None
+        assert 'continuing with the validated result' in caplog.text
     assert (root / '0/0.0.0.0').exists()

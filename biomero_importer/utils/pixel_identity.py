@@ -11,7 +11,6 @@ from biomero_shallower.pixel_identity import (
     IsccBioIdentityProvider as FilesystemIdentityProvider,
     PixelIdentityError,
     _validate_node_path,
-    os,
 )
 
 
