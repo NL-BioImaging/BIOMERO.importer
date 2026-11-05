@@ -1,5 +1,4 @@
 import importlib.util
-import os
 from pathlib import Path
 
 import numpy as np
@@ -131,38 +130,34 @@ def test_semantic_guard_fails_closed_for_unsupported_metadata(
         read_zarr_v2_semantic_guard(root, ".")
 
 
-def test_builds_identity_from_public_iscc_bio_api(tmp_path):
-    zarr = tmp_path / "input.ome.zarr"
-    zarr.mkdir()
+def make_pixels(root, node_path="."):
+    import zarr
+    node = root if node_path == "." else root / node_path
+    group = zarr.open_group(node, mode="w", zarr_format=2)
+    group.create_array("0", data=np.arange(64, dtype="uint8").reshape(8, 8))
+    group.attrs["multiscales"] = [{"version": "0.4",
+                                   "axes": [{"name": "y"}, {"name": "x"}],
+                                   "datasets": [{"path": "0"}]}]
+    return node
+
+
+def test_builds_identity_through_pixels_only_api(tmp_path):
+    root = tmp_path / "input.zarr"
+    make_pixels(root)
     calls = []
 
-    def generate(source, *, source_type):
-        calls.append((source, source_type))
-        return biocode_response()
+    def generate(planes):
+        calls.extend(planes)
+        return [biocode_result()]
 
-    provider = IsccBioIdentityProvider(
-        generate_biocode=generate,
-        tool_version="0.2.0",
-    )
-
-    identity = provider.generate(
-        zarr,
-        node_path=".",
-        role="image",
-        shape=(1, 2, 3, 16, 32),
-        dtype="uint16",
-        axes=("t", "c", "z", "y", "x"),
-        coordinate_transformations=({"type": "scale", "scale": [1, 1, 1, 2, 2]},),
-    )
-
-    assert calls == [(zarr, "bioio")]
+    identity = IsccBioIdentityProvider(generate_biocode=generate, tool_version="0.2.0").generate(
+        root, node_path=".", role="image", shape=(8, 8), dtype="uint8", axes=("y", "x"))
+    assert len(calls) == 1
     assert identity.iscc_code == "ISCC:KSUM"
-    assert identity.data_code == "ISCC:GDATA"
     assert identity.instance_code == "ISCC:IINSTANCE"
-    assert identity.tool_version == "0.2.0"
-    assert identity.imagewalk_revision == "iscc-bio - v0.2.0"
-    assert identity.node_path == "."
-    assert identity.shape == (1, 2, 3, 16, 32)
+    assert identity.is_current_profile
+    assert identity.dataset_path == "0"
+    assert identity.comparison_shape == (8, 8)
 
 
 def test_default_provider_hashes_standard_numeric_pyramid(tmp_path):
@@ -213,108 +208,23 @@ def test_default_provider_hashes_standard_numeric_pyramid(tmp_path):
     )
 
 
-def test_targets_an_explicit_nested_zarr_node(tmp_path, monkeypatch):
-    root = tmp_path / "plate.ome.zarr"
-    node = root / "A" / "1" / "0"
-    node.mkdir(parents=True)
+@pytest.mark.parametrize("relative", [False, True])
+def test_reads_nested_zarr_without_filesystem_alias(tmp_path, monkeypatch, relative):
+    root = tmp_path / "plate.zarr"
+    make_pixels(root, "A/1/0")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pixel_identity.os, "symlink", lambda *a, **k: pytest.fail("No alias required"))
     calls = []
-    provider = IsccBioIdentityProvider(
-        generate_biocode=lambda source, *, source_type: (
-            calls.append((source, source_type)) or biocode_response()
-        ),
-        tool_version="0.2.0",
-    )
-    aliases = []
 
-    def make_alias(source, alias, *, target_is_directory):
-        aliases.append((source, alias, target_is_directory))
+    def generate(planes):
+        calls.extend(planes)
+        return [biocode_result()]
 
-    monkeypatch.setattr(pixel_identity.os, "symlink", make_alias)
-
-    identity = provider.generate(
-        root,
-        node_path="A/1/0",
-        role="image",
-        shape=(1, 1, 1, 8, 8),
-        dtype="uint8",
-        axes=("t", "c", "z", "y", "x"),
-    )
-
+    identity = IsccBioIdentityProvider(generate_biocode=generate, tool_version="0.2.0").generate(
+        Path("plate.zarr") if relative else root, node_path="A/1/0", role="image",
+        shape=(8, 8), dtype="uint8", axes=("y", "x"))
     assert len(calls) == 1
-    assert calls[0][0].name == "image.ome.zarr"
-    assert calls[0][1] == "bioio"
-    assert aliases[0][0] == node
-    assert aliases[0][1] == calls[0][0]
-    assert aliases[0][2] is True
     assert identity.node_path == "A/1/0"
-
-
-def test_resolves_relative_nested_zarr_node_before_alias(tmp_path, monkeypatch):
-    working_directory = tmp_path / "workflow"
-    node = working_directory / "plate.ome.zarr" / "A" / "1" / "0"
-    node.mkdir(parents=True)
-    monkeypatch.chdir(working_directory)
-    aliases = []
-
-    def make_alias(source, alias, *, target_is_directory):
-        aliases.append((source, alias, target_is_directory))
-
-    monkeypatch.setattr(pixel_identity.os, "symlink", make_alias)
-    provider = IsccBioIdentityProvider(
-        generate_biocode=lambda *_args, **_kwargs: biocode_response(),
-        tool_version="0.2.0",
-    )
-
-    provider.generate(
-        Path("plate.ome.zarr"),
-        node_path="A/1/0",
-        role="image",
-        shape=(1, 1, 1, 8, 8),
-        dtype="uint8",
-        axes=("t", "c", "z", "y", "x"),
-    )
-
-    assert aliases[0][0].is_absolute()
-    assert aliases[0][0] == node.resolve()
-
-
-def test_relative_nested_alias_resolves_on_filesystem(tmp_path, monkeypatch):
-    working_directory = tmp_path / "workflow"
-    node = working_directory / "plate.ome.zarr" / "A" / "1" / "0"
-    node.mkdir(parents=True)
-    monkeypatch.chdir(working_directory)
-    resolved_sources = []
-
-    def generate(source, *, source_type):
-        source = Path(source)
-        assert source_type == "bioio"
-        assert source.is_symlink()
-        assert source.exists()
-        resolved_sources.append(source.resolve())
-        return biocode_response()
-
-    provider = IsccBioIdentityProvider(
-        generate_biocode=generate,
-        tool_version="0.2.0",
-    )
-
-    try:
-        provider.generate(
-            Path("plate.ome.zarr"),
-            node_path="A/1/0",
-            role="image",
-            shape=(1, 1, 1, 8, 8),
-            dtype="uint8",
-            axes=("t", "c", "z", "y", "x"),
-        )
-    except PixelIdentityError as exc:
-        if os.name == "nt" and isinstance(exc.__cause__, OSError):
-            pytest.skip(
-                "Creating directory symlinks requires Windows privileges"
-            )
-        raise
-
-    assert resolved_sources == [node.resolve()]
 
 
 def test_builds_omero_identity_through_same_public_api():
@@ -384,12 +294,12 @@ def test_rejects_unsafe_node_path(tmp_path, node_path):
 
 def test_rejects_missing_or_ambiguous_scene(tmp_path):
     zarr = tmp_path / "input.ome.zarr"
-    zarr.mkdir()
+    make_pixels(zarr)
 
     for results in ([], [biocode_result(), biocode_result(code="ISCC:KOTHER")]):
         provider = IsccBioIdentityProvider(
             generate_biocode=lambda *args, _results=results, **kwargs: (
-                biocode_response(_results)
+                _results
             ),
             tool_version="0.2.0",
         )
@@ -406,11 +316,9 @@ def test_rejects_missing_or_ambiguous_scene(tmp_path):
 
 def test_rejects_unexpected_upstream_result(tmp_path):
     zarr = tmp_path / "input.ome.zarr"
-    zarr.mkdir()
+    make_pixels(zarr)
     provider = IsccBioIdentityProvider(
-        generate_biocode=lambda *args, **kwargs: biocode_response(
-            [{"iscc_code": "ISCC:KSUM", "units": ["ISCC:GDATA"]}]
-        ),
+        generate_biocode=lambda *args, **kwargs: [{"iscc_code": "ISCC:KSUM", "units": ["ISCC:GDATA"]}],
         tool_version="0.2.0",
     )
 
@@ -427,9 +335,9 @@ def test_rejects_unexpected_upstream_result(tmp_path):
 
 def test_exact_match_requires_instance_code_and_semantic_guard(tmp_path):
     zarr = tmp_path / "input.ome.zarr"
-    zarr.mkdir()
+    make_pixels(zarr)
     provider = IsccBioIdentityProvider(
-        generate_biocode=lambda *args, **kwargs: biocode_response(),
+        generate_biocode=lambda *args, **kwargs: [biocode_result()],
         tool_version="0.2.0",
     )
     first = provider.generate(
@@ -456,7 +364,8 @@ def test_default_provider_loads_upstream_lazily(monkeypatch):
         imported.append(name)
         raise ImportError("not installed")
 
-    monkeypatch.setattr(pixel_identity, "import_module", fail_import)
+    from biomero_shallower import pixel_identity as filesystem_identity
+    monkeypatch.setattr(filesystem_identity, "import_module", fail_import)
     provider = IsccBioIdentityProvider()
 
     with pytest.raises(PixelIdentityError, match="identity extra"):
@@ -469,4 +378,4 @@ def test_default_provider_loads_upstream_lazily(monkeypatch):
             axes=("y", "x"),
         )
 
-    assert imported == ["iscc_bio.api"]
+    assert imported == ["iscc_bio.biocode"]

@@ -81,6 +81,9 @@ def _identity(
     role="image",
 ) -> PixelIdentity:
     return PixelIdentity(
+        comparison_profile="biomero-pixels-v1",
+        dataset_path="0",
+        comparison_shape=(1, 1, 8, 8),
         node_path=node_path,
         role=role,
         iscc_code="ISCC:KSUM",

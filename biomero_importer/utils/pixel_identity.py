@@ -98,9 +98,6 @@ def _generate_gateway_identity(connection, image_id, tool_version):
 class IsccBioIdentityProvider(FilesystemIdentityProvider):
     """Add the OMERO source adapter to the shared filesystem provider."""
 
-    def _import_upstream(self):
-        return import_module("iscc_bio.api")
-
     def generate_omero(
         self,
         connection: Any,
