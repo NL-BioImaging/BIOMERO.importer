@@ -23,6 +23,7 @@ from biomero_schema.zarr import (
 )
 
 from .pixel_identity import PixelIdentityError
+from .canonical_store import cache_refreshed_inputs
 from biomero_schema.shallower import SHALLOW_OPERATION_REPORT, ShallowOperationReport
 from biomero_shallower.operations import locked, validate_report
 from biomero_shallower import __version__ as shallower_version
@@ -33,6 +34,7 @@ from .result_zarr import (
     evaluate_returned_zarr,
     normalize_returned_zarr,
     remove_transfer_input_marker,
+    load_managed_storage_roots,
 )
 
 
@@ -336,16 +338,24 @@ class ImportLifecycleEngine:
                     report = validate_report(root, operation.canonical_inputs,
                                              image=expected_image, tool_version=expected_version,
                                              artifact=PurePosixPath(receipt.artifact_path).name)
-                    if (report.result != "normalized" or report.task_id != receipt.task_id
+                    if (report.result not in {"normalized", "kept-full"} or report.task_id != receipt.task_id
                             or report.slurm_job_id != receipt.slurm_job_id):
                         raise ValueError("Remote shallow task provenance mismatch")
+                    if report.refreshed_inputs is not None:
+                        cache_refreshed_inputs(operation.canonical_inputs,
+                            report.refreshed_inputs.inputs, load_managed_storage_roots())
                     write_json(root / '.biomero-import-storage.json', {
                         'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
-                        'storage': 'shallow-zarr', 'location': 'remote',
+                        'storage': ('shallow-zarr' if report.result == "normalized" else 'full-zarr'),
+                        'location': 'remote', 'decision_basis': report.reason,
                         'container': receipt.image, 'tool_version': receipt.tool_version,
                         'task_id': str(receipt.task_id), 'job_id': receipt.slurm_job_id,
                         'report_sha256': receipt.report_sha256,
                     })
+                    if report.result == "kept-full":
+                        remove_transfer_input_marker(root)
+                        prepared.extend(_full_result_items(root, operation, item.registration))
+                        continue
                 elif (root / SHALLOW_OPERATION_REPORT).exists():
                     attempt = ShallowOperationReport.from_dict(json.loads(
                         (root / SHALLOW_OPERATION_REPORT).read_text(encoding="utf-8")))
@@ -371,8 +381,12 @@ class ImportLifecycleEngine:
                     root,
                     operation.canonical_inputs,
                     identity_workers=workers,
+                    storage_roots=load_managed_storage_roots(),
                 )
                 decisions.append(decision)
+                if decision.refreshed_inputs:
+                    cache_refreshed_inputs(operation.canonical_inputs,
+                        decision.refreshed_inputs, load_managed_storage_roots())
                 self.logger.info(
                     "Returned Zarr decision for %s: %s (%s)",
                     root,
@@ -401,6 +415,7 @@ class ImportLifecycleEngine:
                     'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
                     'storage': 'shallow-zarr', 'location': 'importer',
                     'tool_version': shallower_version,
+                    'decision_basis': decision.reason,
                 })
                 self.logger.info(
                     "Stored shallow Zarr %s with %s image node(s)",

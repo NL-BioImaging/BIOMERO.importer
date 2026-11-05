@@ -32,7 +32,7 @@ write_indexed_canonical_marker = canonical_store.write_indexed_canonical_marker
 
 @pytest.fixture
 def source_record():
-    return {
+    return CanonicalZarrSource.from_dict({
         "schema": 1,
         "storageRoot": "group-5-data",
         "relativePath": "project/.processed/Image-3207.ome.zarr",
@@ -59,7 +59,7 @@ def source_record():
         "pixelIdentityOrigin": "raw",
         "canonicalPixelVerified": True,
         "storeIdentity": None,
-    }
+    }).to_dict()
 
 
 def make_zarr_v2(path: Path):
@@ -180,6 +180,21 @@ def test_indexes_native_zarr_with_external_marker(tmp_path, source_record):
     assert load_canonical_marker(native) == CanonicalZarrSource.from_dict(
         source_record
     )
+
+
+def test_adopts_legacy_marker_without_new_optional_comparison_fields(tmp_path, source_record):
+    store = CanonicalStore(tmp_path)
+    staging = tmp_path / "staging.zarr"
+    make_zarr_v2(staging)
+    committed = store.commit(staging, source_record)
+    marker_path = committed / CANONICAL_MARKER_NAME
+    marker = json.loads(marker_path.read_text())
+    marker["source"].pop("imageMetadata")
+    for key in ("comparisonProfile", "datasetPath", "comparisonShape",
+                "comparisonCoordinateTransformations", "codeBits"):
+        marker["source"]["pixelIdentity"].pop(key, None)
+    marker_path.write_text(json.dumps(marker))
+    assert store.adopt(source_record) == committed
 
 
 def test_external_marker_round_trips_plate_identity_inventory(

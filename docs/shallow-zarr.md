@@ -25,6 +25,19 @@ the `biomero.shallow-zarr` capability; it does **not** turn ordinary uploads
 into shallow imports. An order must explicitly request the operation and
 provide the trusted canonical-input manifest for its workflow.
 
+Within an enabled operation, usable RO-Crate output declarations take
+precedence, followed by the workflow's saved `original_pixels_not_required`
+setting. Both routes reuse the known source without measuring original pixels
+again. Otherwise the shared shallower compares decoded pixels at the coarsest
+compatible pyramid level; labels retain full-resolution comparison. Full-image
+shape, axes, dtype and coordinate guards still apply. Missing or stale comparison
+metadata is refreshed from the same canonical backing store when needed; no
+source export, copy or reimport is required. Fresh OMERO exports retain their
+separate full-resolution correctness check.
+Remote helpers without a current source comparison cache keep full results for
+local evaluation against managed canonical storage. A mutable HPC input copy
+cannot refresh that authoritative cache.
+
 The calling process can check `get_importer_capabilities()` before submitting
 an order. This describes that process's installed dependencies and environment;
 it does not query a remote importer service. Keep their configuration aligned.
@@ -98,8 +111,9 @@ registration still take place in the importer.
 
 A remote result cannot be accepted merely because its archive contains a
 report. Missing trusted receipts, mismatched versions, tampering and unresolved
-canonical sources cause an error. Full results safely retained by the helper
-can use local shallowing. A corrupt or incomplete shallow result is not
+canonical sources cause an error. A trusted kept-full receipt can also refresh
+canonical comparison metadata without repeating an unsuccessful comparison.
+Full results without such a receipt can use local shallowing. A corrupt or incomplete shallow result is not
 silently treated as a full Zarr.
 
 Canonical storage must remain available through the configured shared mounts

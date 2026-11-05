@@ -76,6 +76,7 @@ class CanonicalPromotionService:
         ],
         interchange_profile: str = "ngff-0.4-zarr-v2",
         store_identity: str | None = None,
+        cache_identity: bool = True,
     ) -> CanonicalPromotionResult:
         """Commit ``staging_path`` only after exact cross-source verification."""
         if (
@@ -106,7 +107,13 @@ class CanonicalPromotionService:
             source_object_id=source_object_id,
             source_generation=source_generation,
             interchange_profile=interchange_profile,
-            pixel_identity=original_identity,
+            pixel_identity=original_identity if cache_identity else None,
+            image_metadata={
+                "shape": list(exported_identity.shape),
+                "dtype": exported_identity.dtype,
+                "axes": list(exported_identity.axes),
+                "coordinateTransformations": list(exported_identity.coordinate_transformations),
+            },
             pixel_identity_origin=pixel_identity_origin,
             canonical_pixel_verified=True,
             store_identity=store_identity,

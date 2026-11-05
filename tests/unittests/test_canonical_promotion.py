@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
-from biomero_schema.zarr import PixelIdentity
+from biomero_schema.zarr import PixelIdentity, PIXEL_COMPARISON_PROFILE
 
 
 def load_module(name, relative_path):
@@ -38,6 +38,9 @@ def identity(instance="ISCC:IINSTANCE", shape=(1, 1, 8, 8), node_path="."):
         tool_version="0.1.0",
         imagewalk_revision="iscc-bio/0.1.0@revision",
         shape=shape,
+        comparison_profile=PIXEL_COMPARISON_PROFILE,
+        dataset_path="0",
+        comparison_shape=shape,
         dtype="uint16",
         axes=("t", "c", "y", "x"),
         coordinate_transformations=(
@@ -95,6 +98,19 @@ def test_verifies_and_atomically_promotes_first_export(tmp_path):
         )
     )
     assert marker["source"] == result.source.to_dict()
+
+
+def test_export_check_does_not_need_to_cache_full_resolution_identity(tmp_path):
+    staging = tmp_path / "workflow" / "result.zarr"
+    make_zarr(staging)
+    result = service(tmp_path).promote(
+        staging, source_directory="project", source_object_type="Image",
+        source_object_id=7, source_generation=1, node_path=".",
+        original_identity=identity(), exported_identity=identity(),
+        pixel_identity_origin="omero-pixels", cache_identity=False)
+    assert result.source.pixel_identity is None
+    assert result.source.canonical_pixel_verified
+    assert result.source.image_metadata["shape"] == list(identity().shape)
 
 
 def test_mismatch_never_promotes_or_removes_staging(tmp_path):

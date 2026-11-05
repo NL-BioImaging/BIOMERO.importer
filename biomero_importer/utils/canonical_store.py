@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import errno
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -152,7 +153,7 @@ class CanonicalStore:
             raise InvalidCanonicalStore(
                 f"Canonical marker is not committed: {marker_path}"
             )
-        if marker.get("source") != source_payload:
+        if _source_payload(marker.get("source", {})) != source_payload:
             raise InvalidCanonicalStore(
                 f"Canonical marker does not match requested source: {destination}"
             )
@@ -257,7 +258,8 @@ def write_indexed_canonical_marker(
     """Atomically persist detailed identities beside an indexed managed Zarr."""
     zarr_path = Path(zarr_path).resolve()
     CanonicalStore._validate_zarr(zarr_path)
-    marker_path = external_canonical_marker_path(zarr_path)
+    internal = zarr_path / CANONICAL_MARKER_NAME
+    marker_path = internal if internal.is_file() else external_canonical_marker_path(zarr_path)
     marker_path.parent.mkdir(parents=True, exist_ok=True)
     marker = {
         "markerSchema": CANONICAL_MARKER_SCHEMA,
@@ -311,3 +313,67 @@ def load_canonical_marker(
     if "images" in payload and "sourceObjectType" not in payload:
         return CanonicalPlateSource.from_dict(payload)
     return CanonicalZarrSource.from_dict(payload)
+
+
+def cache_refreshed_inputs(expected, refreshed_inputs, storage_roots):
+    """Persist measured comparison metadata without changing source bindings.
+
+    The workflow snapshot remains immutable. This replaces the current managed
+    source cache so later runs reuse it, including after a keep-full decision.
+    """
+    def binding(source):
+        return source.model_dump(exclude={
+            "pixel_identity", "pixel_identity_origin", "canonical_pixel_verified",
+            "image_metadata",
+        })
+
+    expected_by_artifact = {item.transfer_artifact: item for item in expected.inputs}
+    written = 0
+    for refreshed in refreshed_inputs:
+        previous = expected_by_artifact.get(refreshed.transfer_artifact)
+        if previous is None:
+            raise ValueError("Comparison refresh has an unknown input artifact")
+        if (previous.model_dump(exclude={"source", "plate_source"})
+                != refreshed.model_dump(exclude={"source", "plate_source"})):
+            raise ValueError("Comparison refresh changed selected input binding")
+        previous_sources = ({i.image_node_path: i.source for i in previous.plate_source.images}
+                            if previous.plate_source else {previous.source.node_path: previous.source})
+        current_sources = ({i.image_node_path: i.source for i in refreshed.plate_source.images}
+                           if refreshed.plate_source else {refreshed.source.node_path: refreshed.source})
+        if previous_sources.keys() != current_sources.keys():
+            raise ValueError("Comparison refresh changed input image layout")
+        changed = False
+        for node_path, source in current_sources.items():
+            original = previous_sources[node_path]
+            if binding(original) != binding(source):
+                raise ValueError("Comparison refresh changed canonical source binding")
+            if (original.image_metadata and source.image_metadata
+                    and original.image_metadata != source.image_metadata):
+                raise ValueError("Comparison refresh changed original image metadata")
+            if source.pixel_identity is not None and source.pixel_identity.is_current_profile:
+                changed = changed or source.pixel_identity != original.pixel_identity
+        if not changed:
+            continue
+        updated = refreshed.plate_source or refreshed.source
+        root = storage_roots.get(updated.storage_root)
+        if root is None:
+            raise ValueError("Unknown managed storage root for comparison refresh")
+        store = CanonicalStore(root)
+        path = store.resolve(updated.relative_path)
+        if not path.is_dir():
+            raise ValueError("Canonical comparison backing store is unavailable")
+        # Retain the original label inventory. This operation refreshes only
+        # original-image comparisons, never label ownership or provenance.
+        if refreshed.plate_source:
+            updated = previous.plate_source.model_copy(update={"images": tuple(
+                image.model_copy(update={"source": current_sources[image.image_node_path]})
+                for image in previous.plate_source.images)})
+        try:
+            write_indexed_canonical_marker(path, updated)
+        except OSError:
+            logging.getLogger(__name__).warning(
+                "Could not persist optional comparison metadata for %s; "
+                "continuing with the validated result", path, exc_info=True)
+            continue
+        written += 1
+    return written
