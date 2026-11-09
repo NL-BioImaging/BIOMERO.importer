@@ -26,7 +26,11 @@ def test_operation_keepalive_refreshes_all_omero_connections():
     called = Event()
     root_conn = MagicMock()
     user_conn = MagicMock()
-    user_conn.keepAlive.side_effect = called.set
+    def keep_alive():
+        called.set()
+        return True
+
+    user_conn.keepAlive.side_effect = keep_alive
 
     with omero_connection_keepalive(
         (("root", root_conn), ("user", user_conn)),

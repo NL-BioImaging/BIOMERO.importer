@@ -157,8 +157,13 @@ Filesystem recovery is separate from OMERO registration. An order can fail after
 registering some of its objects, and startup marks interrupted orders failed.
 Review the order's log and registered objects before issuing a replacement.
 Import provenance is mandatory: a file is successful only after its registered
-objects have the import-order annotation. Sessions stay alive through registration
-and postprocessing. If annotation access fails, the importer makes up to three
+objects have the import-order annotation. The importer keeps sessions active
+during processing and checks a supplied session before starting a
+connection-backed operation.
+If it has expired, a new session is opened for the order's user and group.
+Registration is not automatically repeated after it has started; if a session
+fails during registration, reconcile any partial objects before retrying.
+If annotation access fails, the importer makes up to three
 annotation-only attempts, reconnecting as the original user in the original
 group and reusing the exact registered IDs. A write whose response was lost is
 accepted only after all expected provenance fields are found on the linked

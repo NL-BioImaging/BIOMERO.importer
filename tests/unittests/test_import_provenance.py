@@ -2,6 +2,7 @@
 
 from threading import Event
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -52,6 +53,158 @@ def annotation(values, annotation_id=80):
     return result
 
 
+@pytest.mark.parametrize("alive", [True, False])
+def test_registration_renews_expired_connection_before_start(
+    importer, connections, monkeypatch, tmp_path, alive,
+):
+    from biomero_importer.utils import register
+
+    original, fresh, root, _ = connections
+    original.keepAlive.return_value = alive
+    fresh.keepAlive.return_value = True
+    registered = MagicMock()
+    registered.getId.return_value.getValue.return_value = 991
+    register_plate = MagicMock(return_value=registered)
+    monkeypatch.setattr(module, "SHALLOW_ZARR_ENABLED", False)
+    monkeypatch.setattr(register, "load_attrs", lambda store: {"plate": {}})
+    monkeypatch.setattr(register, "register_plate", register_plate)
+    monkeypatch.setattr(register, "link_to_target", MagicMock())
+    monkeypatch.setattr(importer, "ensure_import_annotations", MagicMock())
+    result_path = tmp_path / "result.ome.zarr"
+    result_path.mkdir()
+
+    successful, failed = importer.upload_files(
+        original, [str(result_path)], screen_id=42,
+    )
+
+    assert not failed
+    assert successful[0][3] == 991
+    register_plate.assert_called_once()
+    assert register_plate.call_args.args[0] is (original if alive else fresh)
+    if alive:
+        root.suConn.assert_not_called()
+    else:
+        root.suConn.assert_called_once_with("requester", ttl=6000000)
+        fresh.setGroupForSession.assert_called_once_with(17)
+        root.suConn.return_value.__exit__.assert_called_once()
+
+
+def test_registration_disconnect_is_not_replayed(
+    importer, connections, monkeypatch, tmp_path,
+):
+    from biomero_importer.utils import register
+
+    original, _, root, _ = connections
+    original.keepAlive.return_value = True
+    register_plate = MagicMock(side_effect=ConnectionError("session lost"))
+    monkeypatch.setattr(module, "SHALLOW_ZARR_ENABLED", False)
+    monkeypatch.setattr(register, "load_attrs", lambda store: {"plate": {}})
+    monkeypatch.setattr(register, "register_plate", register_plate)
+    result_path = tmp_path / "result.ome.zarr"
+    result_path.mkdir()
+
+    successful, failed = importer.upload_files(
+        original, [str(result_path)], screen_id=42,
+    )
+
+    assert not successful and len(failed) == 1
+    register_plate.assert_called_once()
+    root.suConn.assert_not_called()
+    assert "Reconcile any registered objects before retrying" in (
+        importer.data_package["Description"]
+    )
+
+
+def test_session_expiring_during_preparation_is_replaced_for_registration(
+    importer, connections, monkeypatch, tmp_path,
+):
+    from biomero_schema import imports
+    from biomero_importer.utils import lifecycle, register
+
+    _, original, _, _ = connections
+    original.keepAlive.return_value = True
+    replacement = MagicMock()
+    replacement.keepAlive.return_value = True
+    replacement_root = MagicMock()
+    replacement_root.__enter__.return_value = replacement_root
+    replacement_root.suConn.return_value.__enter__.return_value = replacement
+    module.BlitzGateway.side_effect = [
+        module.BlitzGateway.return_value, replacement_root,
+    ]
+    monkeypatch.setattr(module, "SHALLOW_ZARR_ENABLED", False)
+    monkeypatch.setattr(module, "DataProcessor", MagicMock())
+    module.DataProcessor.return_value.has_preprocessing.return_value = False
+    monkeypatch.setattr(module, "get_tmp_output_path", lambda _: "/nonexistent")
+    monkeypatch.setattr(imports, "parse_import_options", lambda _: SimpleNamespace(
+        operations=[object()],
+    ))
+    result_path = tmp_path / "result.ome.zarr"
+    result_path.mkdir()
+    item = SimpleNamespace(
+        role="result", path=result_path, registration=MagicMock(),
+    )
+
+    def prepare(*args):
+        original.keepAlive.return_value = False
+        return SimpleNamespace(items=[item])
+
+    engine = MagicMock()
+    engine.prepare.side_effect = prepare
+    monkeypatch.setattr(lifecycle, "ImportLifecycleEngine", lambda *args: engine)
+    registered = MagicMock()
+    registered.getId.return_value.getValue.return_value = 991
+    register_plate = MagicMock(return_value=registered)
+    monkeypatch.setattr(register, "load_attrs", lambda store: {"plate": {}})
+    monkeypatch.setattr(register, "register_plate", register_plate)
+    monkeypatch.setattr(register, "link_to_target", MagicMock())
+    monkeypatch.setattr(importer, "ensure_import_annotations", MagicMock())
+
+    successful, failed, import_failed = importer.import_data_package()
+
+    assert successful and not failed and not import_failed
+    engine.prepare.assert_called_once()
+    register_plate.assert_called_once()
+    assert register_plate.call_args.args[0] is replacement
+    replacement_root.suConn.assert_called_once_with("requester", ttl=6000000)
+    replacement.setGroupForSession.assert_called_once_with(17)
+    replacement_root.suConn.return_value.__exit__.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["dead-session", "wrong-group"])
+def test_replacement_connection_must_be_alive_and_in_requested_group(
+    importer, connections, failure,
+):
+    original, fresh, root, _ = connections
+    original.keepAlive.return_value = False
+    fresh.keepAlive.return_value = failure != "dead-session"
+    fresh.setGroupForSession.return_value = failure != "wrong-group"
+
+    with pytest.raises(ConnectionError):
+        importer.create_new_dataset(original)
+
+    fresh.getUpdateService.assert_not_called()
+    root.suConn.return_value.__exit__.assert_called_once()
+
+
+def test_keepalive_logs_false_return():
+    root = MagicMock()
+    user = MagicMock()
+    root.keepAlive.return_value = True
+    called = Event()
+
+    def failed_keepalive():
+        called.set()
+        return False
+
+    user.keepAlive.side_effect = failed_keepalive
+    logger = MagicMock()
+    with module.omero_connection_keepalive(
+        (("root", root), ("user", user)), logger, "test", interval=0.01,
+    ):
+        assert called.wait(1)
+    logger.warning.assert_called()
+
+
 def test_expired_connection_repairs_exact_registered_plate(
     importer, connections, monkeypatch,
 ):
@@ -71,6 +224,25 @@ def test_expired_connection_repairs_exact_registered_plate(
     assert post.call_args.kwargs['conn'] is fresh
     assert post.call_args.kwargs['object_id'] == 991
     root.suConn.assert_called_once_with('requester', ttl=6000000)
+    fresh.setGroupForSession.assert_called_once_with(17)
+
+
+def test_expired_connection_renews_for_annotation_without_reimport(
+    importer, connections, monkeypatch,
+):
+    original, fresh, root, _ = connections
+    original.keepAlive.return_value = False
+    importer.import_zarr = MagicMock(return_value=([991], True))
+    post = MagicMock(return_value=80)
+    monkeypatch.setattr(module.ezomero, "post_map_annotation", post)
+
+    successful, failed = upload(importer, original)
+
+    assert successful and not failed
+    importer.import_zarr.assert_called_once()
+    assert post.call_args.kwargs["conn"] is fresh
+    assert post.call_args.kwargs["object_id"] == 991
+    root.suConn.assert_called_once_with("requester", ttl=6000000)
     fresh.setGroupForSession.assert_called_once_with(17)
 
 
@@ -169,7 +341,11 @@ def test_registration_and_postprocessing_keep_both_sessions_alive(
     module.DataProcessor.return_value.has_preprocessing.return_value = False
     monkeypatch.setattr(module, 'get_tmp_output_path', lambda _: '/nonexistent')
     heartbeat = Event()
-    fresh.keepAlive.side_effect = heartbeat.set
+    def keep_alive():
+        heartbeat.set()
+        return True
+
+    fresh.keepAlive.side_effect = keep_alive
 
     def long_registration(*args, **kwargs):
         heartbeat.clear()
