@@ -89,7 +89,13 @@ def omero_connection_keepalive(
         while not stop_event.wait(interval):
             for connection_name, conn in connections:
                 try:
-                    conn.keepAlive()
+                    if not conn.keepAlive():
+                        logger.warning(
+                            "The %s OMERO connection is no longer alive "
+                            "during %s",
+                            connection_name,
+                            operation_name,
+                        )
                 except Exception as exc:
                     logger.warning(
                         "Could not keep the %s OMERO connection alive during "
@@ -190,13 +196,19 @@ def is_retryable_podman_run_error(output_lines):
 def connection(func):
     """
     A decorator that wraps a function so that it receives an OMERO user connection.
-    If a connection is already provided (as the first positional argument after self), it is reused.
+    A provided connection is reused when alive; otherwise a new session is
+    opened for the order's user and group before the operation starts.
     """
     @functools.wraps(func)
     def wrapper_connection(self, *args, **kwargs):
-        # If a connection is already provided, simply call the function.
         if args and hasattr(args[0], "keepAlive"):
-            return func(self, *args, **kwargs)
+            if args[0].keepAlive():
+                return func(self, *args, **kwargs)
+            self.logger.warning(
+                "OMERO connection is no longer alive before %s; "
+                "opening a new user session", func.__name__,
+            )
+            args = args[1:]
         try:
             with BlitzGateway(self.user, self.password, host=self.host, port=self.port, secure=True) as root_conn:
                 self.logger.debug("Connected as root to OMERO.")
@@ -212,10 +224,14 @@ def connection(func):
                         self.logger,
                         func.__name__,
                     ):
-                        user_conn.keepAlive()
+                        if not user_conn.keepAlive():
+                            raise ConnectionError(
+                                "New OMERO user session is not alive.")
                         self.logger.debug(
                             f"Connected as user {intended_username}")
-                        user_conn.setGroupForSession(group_id)
+                        if user_conn.setGroupForSession(group_id) is False:
+                            raise ConnectionError(
+                                f"Could not set OMERO session group to {group_name}.")
                         self.logger.debug(f"Session group set to {group_name}")
                         return func(self, user_conn, *args, **kwargs)
                 else:
