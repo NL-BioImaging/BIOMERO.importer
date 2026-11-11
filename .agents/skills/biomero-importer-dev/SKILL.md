@@ -5,24 +5,13 @@ description: Develop and test BIOMERO.importer, including OMERO in-place registr
 
 # BIOMERO.importer Development
 
+Required reading first: the [shared NL-BIOMERO engineering rules](https://github.com/NL-BioImaging/NL-BIOMERO/blob/master/.agents/skills/nl-biomero-engineering/SKILL.md) (branches,
+pull requests, merging, agent guidance, local checkouts). This skill adds only
+importer-specific rules.
+
 Treat `README.md`, `pyproject.toml`, and `.github/workflows/python-package.yml`
 as the authoritative setup and test instructions. Inspect them before changing
 dependencies, Python support, CI, or import behavior.
-
-## Pull-request branch workflow
-
-On an existing non-default branch intended for a pull request, make focused,
-coherent commits and push them as normal completion of authorized development
-work. Do not hold the branch locally merely to run a slow full suite: run cheap,
-relevant checks that catch immediate mistakes, inspect the diff, then let the
-required GitHub Actions checks be the full-suite gate. If CI fails, inspect it
-and push a follow-up fix. Incremental branch commits may stay small because the
-pull request will normally be squash-merged.
-
-Use proportionate local verification before a direct default-branch push,
-release, change without suitable CI coverage, or higher-risk operation. This
-workflow does not authorize unrelated publication, merging, deployment, or
-destructive actions.
 
 ## Development environment
 
@@ -102,8 +91,7 @@ decisions about defaults and rollout scope.
 - Preserve in-place import and shared `/data` path behavior.
 - Importer source changes require an importer service restart after deployment
   because worker processes may cache imported modules.
-- Finish an authorized development step with a focused commit and follow the
-  pull-request branch workflow above for publication and CI.
+- Follow the shared rules for publication and CI.
 
 ## Release notes
 
