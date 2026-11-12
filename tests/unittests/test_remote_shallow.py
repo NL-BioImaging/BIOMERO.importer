@@ -1,4 +1,5 @@
 import hashlib
+import re
 import json
 from unittest.mock import patch
 
@@ -89,6 +90,8 @@ def test_remote_result_without_receipt_is_evaluated_locally_with_warning(tmp_pat
     assert evaluate.call_count == 1
     warnings = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
     assert len([m for m in warnings if 'no receipt; evaluating locally' in m]) == 1
+    assert (root / '.biomero-remote-attempt.json').is_file()
+    assert not (root / SHALLOW_OPERATION_REPORT).exists()
 
 
 def test_remote_tamper_is_rejected(tmp_path, monkeypatch):
@@ -143,7 +146,7 @@ def test_remote_version_mismatch_with_newer_report_schema_fails_with_hint(tmp_pa
     report = root / SHALLOW_OPERATION_REPORT
     report.write_text(report.read_text().replace('"schema": 1', '"schema": 2', 1))
     options = _receipt_for(root, options, '0.0.1')
-    with pytest.raises(ValueError, match=rf'(?s)0\.0\.1.*not compatible with installed {shallower_version}.*Install the matching'):
+    with pytest.raises(ValueError, match=rf'(?s)0\.0\.1.*not compatible with installed {re.escape(shallower_version)}.*Install the matching'):
         ImportLifecycleEngine().prepare([root], options)
     assert 'validated with the installed package' not in caplog.text
 

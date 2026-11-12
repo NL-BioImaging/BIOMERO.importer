@@ -140,8 +140,9 @@ logged and the full result is imported, recorded as `full-zarr` with reason
 (for example while deleting the rollback folder), the committed shallow result
 is used and the next automatic recovery finishes the cleanup of the leftover
 `.<name>.biomero-prune-*` folder. Never delete that folder or its journal by
-hand: the journal is what lets recovery restore or finish a prune. Shallower
-deletes the journal last, so a missing journal with pruned arrays left behind
+hand: the journal is what lets recovery restore or finish a prune. From the
+biomero-shallower release with the cleanup fix (BIOMERO.shallower#35) the
+journal is deleted last, so a missing journal with pruned arrays left behind
 cannot result from an interrupted post-commit cleanup.
 Ordinary imports without a lifecycle operation are unaffected, even when shallow
 storage is enabled. Before inspecting a shallow result,

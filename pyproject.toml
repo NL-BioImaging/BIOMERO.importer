@@ -32,7 +32,7 @@ dependencies = [
     "zarr>=3",
     "alembic>=1.13",
     "biomero-schema>=0.3.0b3,<0.4",
-    "biomero-shallower>=0.1.0b9,<0.2"
+    "biomero-shallower>=0.1.0b10,<0.2"
 ]
 
 [project.optional-dependencies]

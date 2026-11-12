@@ -29,14 +29,27 @@ from biomero_schema.zarr import (
     ZarrImportOptions,
 )
 from biomero_shallower import __version__ as shallower_version
-from biomero_shallower.operations import locked, validate_report
-from biomero_shallower.transaction import recover, write_json
+from biomero_shallower.operations import (
+    NORMALIZATION_FAILED,
+    RESULT_KEPT_FULL,
+    RESULT_NORMALIZED,
+    locked,
+    validate_report,
+)
+from biomero_shallower.transaction import (
+    prune_committed,
+    recover,
+    rollback_folders,
+    write_json,
+)
 
 from .canonical_store import cache_refreshed_inputs
 from .pixel_identity import PixelIdentityError
 from .result_zarr import (
+    OUTCOME_KEEP_FULL,
     ReturnedZarrDecision,
     discover_ngff_nodes,
+    is_failure_reason,
     evaluate_returned_zarr,
     normalize_returned_zarr,
     remove_transfer_input_marker,
@@ -63,11 +76,6 @@ STORAGE_FULL = "full-zarr"
 LOCATION_REMOTE = "remote"
 LOCATION_IMPORTER = "importer"
 
-# Result of a remote helper report, and outcome of a local evaluation.
-REPORT_NORMALIZED = "normalized"
-REPORT_KEPT_FULL = "kept-full"
-DECISION_KEEP_FULL = "keep-full"
-
 # Zarr store layout and NGFF node roles.
 ZARR_DIRECTORY_SUFFIX = ".zarr"
 ZARR_V2_ATTRIBUTES_FILENAME = ".zattrs"
@@ -82,22 +90,11 @@ SOURCE_TYPE_PLATE = "Plate"
 SOURCE_TYPE_IMAGE = "Image"
 PLATE_PIXEL_SOURCE_LABEL = "label"
 
-# Interrupted prune transactions leave a sibling folder with a journal.
-PRUNE_FOLDER_PATTERN = ".{name}.biomero-prune-*"
-PRUNE_JOURNAL_FILENAME = "journal.json"
-
 # Roles of the items the lifecycle hands to registration.
 ROLE_INPUT = "input"
 ROLE_PRIMARY = "primary"
 ROLE_IMAGE_LABEL = "image-label"
 ROLE_PLATE_LABEL_PREVIEW = "plate-label-preview"
-
-# keep-full reasons that signal a failure rather than an expected comparison.
-_KEEP_FULL_FAILURE_PREFIXES = (
-    "normalization-failed", "unsupported-", "identity-unavailable",
-    "label-identity-unavailable", "invalid-", "untrusted-", "ambiguous-",
-    "no-canonical-input-snapshot",
-)
 
 
 @dataclass(frozen=True)
@@ -106,6 +103,7 @@ class PreparedImportItem:
 
     path: Path
     registration: ZarrImportOptions
+    # One of the ROLE_* values below.
     role: Literal[
         "input", "primary", "image-label", "plate-label-preview"
     ]
@@ -191,14 +189,9 @@ def _is_zarr(path: Path) -> bool:
     )
 
 
-def _pending_prune_folders(root: Path):
-    """Yield the rollback folders of interrupted prune transactions of ``root``."""
-    return root.parent.glob(PRUNE_FOLDER_PATTERN.format(name=root.name))
-
-
 def _require_no_pending_prune(root: Path) -> None:
     """Refuse to continue without locking while a prune is still pending."""
-    if next(_pending_prune_folders(root), None) is not None:
+    if next(iter(rollback_folders(root)), None) is not None:
         raise ValueError(
             "Interrupted shallow transaction needs recovery on storage "
             "supporting locks before retrying")
@@ -426,23 +419,14 @@ def _prune_committed(root: Path, logger: logging.Logger) -> bool:
     A manifest next to an uncommitted (or unreadable) prune journal means the
     prune was interrupted before the commit point and must be rolled back.
     """
-    if not (root / SHALLOW_COLLECTION_MANIFEST).exists():
+    try:
+        return prune_committed(root)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning(
+            f"Cannot read the prune journal of {root} ({exc}); treating the "
+            "prune as uncommitted"
+        )
         return False
-    for rollback_folder in _pending_prune_folders(root):
-        journal_path = rollback_folder / PRUNE_JOURNAL_FILENAME
-        if not journal_path.is_file():
-            continue
-        try:
-            journal = json.loads(journal_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            logger.warning(
-                f"Cannot read prune journal {journal_path} ({exc}); treating "
-                "the prune as uncommitted"
-            )
-            return False
-        if not journal.get("committed"):
-            return False
-    return True
 
 
 def _sha256_of_file(path: Path) -> str:
@@ -465,8 +449,7 @@ def _write_full_storage(
 
 def _keep_full_level(reason: str) -> int:
     """WARNING for genuine failures, INFO for expected keep-full outcomes."""
-    return (logging.WARNING if reason.startswith(_KEEP_FULL_FAILURE_PREFIXES)
-            else logging.INFO)
+    return logging.WARNING if is_failure_reason(reason) else logging.INFO
 
 
 class ImportLifecycleEngine:
@@ -590,6 +573,8 @@ class ImportLifecycleEngine:
     ) -> PreparedStore:
         """Prepare one locked Zarr store: remote result, reuse or local shallowing.
 
+        This may write provenance files and prune the store.
+
         Args:
             item: The store to prepare.
             receipt: The store's remote receipt, None if it was not shallowed
@@ -601,7 +586,7 @@ class ImportLifecycleEngine:
         existing_manifest = _load_shallow_manifest(root)
         if receipt is not None:
             remote_report = self._accept_remote_result(root, receipt, operation)
-            if remote_report.result == REPORT_KEPT_FULL:
+            if remote_report.result == RESULT_KEPT_FULL:
                 return PreparedStore(
                     _full_result_items(root, operation, item.registration)
                 )
@@ -686,7 +671,7 @@ class ImportLifecycleEngine:
                 operation.canonical_inputs, report.refreshed_inputs.inputs,
                 load_managed_storage_roots(),
             )
-        remote_kept_full = report.result == REPORT_KEPT_FULL
+        remote_kept_full = report.result == RESULT_KEPT_FULL
         ImportStorageRecord(
             workflow_id=str(operation.canonical_inputs.workflow_id),
             storage=STORAGE_FULL if remote_kept_full else STORAGE_SHALLOW,
@@ -743,7 +728,7 @@ class ImportLifecycleEngine:
             root, receipt, operation
         )
         report_matches_receipt = (
-            report.result in {REPORT_NORMALIZED, REPORT_KEPT_FULL}
+            report.result in {RESULT_NORMALIZED, RESULT_KEPT_FULL}
             and report.task_id == receipt.task_id
             and report.slurm_job_id == receipt.slurm_job_id
         )
@@ -809,7 +794,7 @@ class ImportLifecycleEngine:
         report_path = root / SHALLOW_OPERATION_REPORT
         remote_attempt_report = ShallowOperationReport.from_dict(json.loads(
             report_path.read_text(encoding="utf-8")))
-        if remote_attempt_report.result == REPORT_NORMALIZED:
+        if remote_attempt_report.result == RESULT_NORMALIZED:
             raise ValueError("Remote shallow result is missing its trusted receipt")
         self.logger.warning(
             f"Remote shallowing left {root} with result "
@@ -844,7 +829,7 @@ class ImportLifecycleEngine:
             )
         decision_level = (
             _keep_full_level(decision.reason)
-            if decision.outcome == DECISION_KEEP_FULL else logging.INFO
+            if decision.outcome == OUTCOME_KEEP_FULL else logging.INFO
         )
         self.logger.log(
             decision_level,
@@ -913,7 +898,7 @@ class ImportLifecycleEngine:
             f"Shallowing {root} failed ({failure}); rolled back and "
             "importing the full result", exc_info=True,
         )
-        _write_full_storage(root, operation, f"normalization-failed: {failure}")
+        _write_full_storage(root, operation, f"{NORMALIZATION_FAILED}: {failure}")
         return _full_result_items(root, operation, item.registration)
 
 

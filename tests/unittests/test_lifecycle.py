@@ -567,6 +567,8 @@ def _prune_state(tmp_path, journal):
     ('{"committed": true}', True),
     ('{"committed": false}', False),
     ("not json", False),
+    ("[]", False),
+    ("null", False),
 ])
 def test_prune_committed_reads_the_journal(tmp_path, journal, committed):
     root = _prune_state(tmp_path, journal)
@@ -793,3 +795,14 @@ def test_env_flag_is_parsed_in_one_place(monkeypatch, value, default, expected):
     else:
         monkeypatch.setenv("FLAG_UNDER_TEST", value)
     assert env_flag_enabled("FLAG_UNDER_TEST", default) is expected
+
+
+def test_shared_flag_parser_is_used_by_importer_module(monkeypatch):
+    import importlib
+    import biomero_importer.utils.importer as importer_module
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", " true ")
+    try:
+        assert importlib.reload(importer_module).SHALLOW_ZARR_ENABLED is True
+    finally:
+        monkeypatch.undo()
+        importlib.reload(importer_module)
