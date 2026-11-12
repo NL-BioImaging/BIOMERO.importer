@@ -357,11 +357,10 @@ class ImportLifecycleEngine:
                             "or rerun the workflow with matching versions") from exc
                     if mismatch:
                         self.logger.warning(
-                            "Remote shallower version %s (image %s) differs from "
-                            "installed version %s; %s validated with the "
-                            "installed package",
-                            receipt.tool_version, receipt.image,
-                            shallower_version, root)
+                            f"Remote shallower version {receipt.tool_version} "
+                            f"(image {receipt.image}) differs from installed "
+                            f"version {shallower_version}; {root} validated "
+                            "with the installed package")
                     if (report.result not in {"normalized", "kept-full"} or report.task_id != receipt.task_id
                             or report.slurm_job_id != receipt.slurm_job_id):
                         raise ValueError("Remote shallow task provenance mismatch")
