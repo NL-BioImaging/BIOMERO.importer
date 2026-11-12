@@ -245,6 +245,16 @@ def _full_result_items(
     return tuple(items)
 
 
+def _write_full_storage(
+    root: Path, operation: ShallowZarrImportOperation, reason: str
+) -> None:
+    write_json(root / '.biomero-import-storage.json', {
+        'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
+        'storage': 'full-zarr', 'location': 'importer',
+        'tool_version': shallower_version, 'reason': reason,
+    })
+
+
 class ImportLifecycleEngine:
     """Execute optional native operations without knowing register.py."""
 
@@ -398,19 +408,35 @@ class ImportLifecycleEngine:
                         "Consumed temporary Zarr input marker for %s", root
                     )
                 if not decision.eligible:
-                    write_json(root / '.biomero-import-storage.json', {
-                        'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
-                        'storage': 'full-zarr', 'location': 'importer',
-                        'tool_version': shallower_version, 'reason': decision.reason,
-                    })
+                    _write_full_storage(root, operation, decision.reason)
                     prepared.extend(_full_result_items(
                         root, operation, item.registration
                     ))
                     continue
-                normalized = normalize_returned_zarr(
-                    decision,
-                    operation.canonical_inputs.workflow_id,
-                )
+                try:
+                    normalized = normalize_returned_zarr(
+                        decision,
+                        operation.canonical_inputs.workflow_id,
+                    )
+                except (PixelIdentityError, OSError) as exc:
+                    # Data or filesystem failures roll back inside
+                    # normalize_returned_zarr; keep the full result as the
+                    # remote helper does. Anything else is a bug: propagate.
+                    self.logger.warning(
+                        "Shallowing %s failed (%s); importing the full result",
+                        root, exc,
+                    )
+                    # Idempotent; fails loudly if the rollback is incomplete.
+                    recover(root)
+                    if (root / SHALLOW_COLLECTION_MANIFEST).exists():
+                        raise  # committed: the full result no longer exists
+                    _write_full_storage(
+                        root, operation, f"normalization-failed: {exc}"
+                    )
+                    prepared.extend(_full_result_items(
+                        root, operation, item.registration
+                    ))
+                    continue
                 write_json(root / '.biomero-import-storage.json', {
                     'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
                     'storage': 'shallow-zarr', 'location': 'importer',

@@ -27,6 +27,7 @@ from biomero_schema.zarr import (
 
 from biomero_importer.utils.lifecycle import ImportLifecycleEngine
 from biomero_importer.utils.importer import DataPackageImporter
+from biomero_importer.utils.pixel_identity import PixelIdentityError
 from biomero_importer.utils.result_zarr import (
     NormalizedShallowResult,
     ReturnedZarrDecision,
@@ -395,6 +396,49 @@ def test_eligible_image_keeps_primary_and_adds_label_registration_view(tmp_path,
     assert provenance['location'] == 'importer'
     assert provenance['tool_version']
     assert provenance['workflow_id'] == str(WORKFLOW_ID)
+
+
+@pytest.mark.parametrize("error", [PixelIdentityError("not matching"), OSError(errno.EIO, "io")])
+def test_pruning_failure_keeps_and_imports_full_result(tmp_path, monkeypatch, caplog, error):
+    root = _zarr(tmp_path)
+    recovered = Mock()
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr("biomero_importer.utils.lifecycle.recover", recovered)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="eligible", reason="matched"),
+    )
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr", fail)
+
+    plan = ImportLifecycleEngine().prepare([root], _options())
+
+    assert [(item.path, item.role) for item in plan.items] == [(root, "primary")]
+    provenance = json.loads((root / ".biomero-import-storage.json").read_text())
+    assert provenance["storage"] == "full-zarr"
+    assert provenance["reason"].startswith("normalization-failed")
+    assert "importing the full result" in caplog.text
+    assert recovered.call_count >= 2  # store recovery plus post-failure check
+
+
+def test_programming_error_during_pruning_still_fails(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="eligible", reason="matched"),
+    )
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr",
+        Mock(side_effect=KeyError("bug")))
+    with pytest.raises(KeyError):
+        ImportLifecycleEngine().prepare([root], _options())
 
 
 def test_label_free_shallow_image_keeps_primary_registration(tmp_path, monkeypatch):
