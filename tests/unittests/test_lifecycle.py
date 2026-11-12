@@ -435,8 +435,11 @@ def test_failure_after_commit_uses_committed_shallow_result(tmp_path, monkeypatc
         lambda *args, **kwargs: ReturnedZarrDecision(
             store_path=root, outcome="eligible", reason="matched"),
     )
+    recovered = Mock()
+    monkeypatch.setattr("biomero_importer.utils.lifecycle.recover", recovered)
 
     def commit_then_fail(*args, **kwargs):
+        # Manifest committed, journal already gone.
         (root / ".biomero-shallow.json").write_text("{}", encoding="utf-8")
         raise OSError(errno.EIO, "cleanup failed")
 
@@ -452,6 +455,80 @@ def test_failure_after_commit_uses_committed_shallow_result(tmp_path, monkeypatc
     provenance = json.loads((root / ".biomero-import-storage.json").read_text())
     assert provenance["storage"] == "shallow-zarr"
     assert "committed shallow result" in caplog.text
+    assert recovered.call_count == 1  # only the store recovery before evaluation
+
+
+def _real_pruning_setup(tmp_path, monkeypatch, replace):
+    from functools import partial
+    from test_result_zarr import (
+        _make_image, _manifest as _result_manifest, _input,
+        _identity as _result_identity, IdentityProvider)
+    from biomero_importer.utils.result_zarr import (
+        evaluate_returned_zarr, normalize_returned_zarr)
+    root = tmp_path / "result.zarr"
+    _make_image(root, labels=("cells",))
+    manifest = _result_manifest(_input(0, "result.zarr"))
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        partial(evaluate_returned_zarr,
+                identity_provider=IdentityProvider(_result_identity())))
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr",
+        partial(normalize_returned_zarr, replace=replace))
+    options = ImportOptionsEnvelope(operations=(ShallowZarrImportOperation(
+        canonicalInputs=manifest),))
+    return root, options
+
+
+def _failing_replace(source, target):
+    raise OSError(errno.EIO, "move failed")
+
+
+def test_real_pruning_failure_restores_arrays_and_imports_full(tmp_path, monkeypatch):
+    root, options = _real_pruning_setup(tmp_path, monkeypatch, _failing_replace)
+
+    plan = ImportLifecycleEngine().prepare([root], options)
+
+    assert (root / "0" / "0.0.0.0").is_file()
+    assert not (root / ".biomero-shallow.json").exists()
+    assert not list(tmp_path.glob(".result.zarr.biomero-prune-*"))
+    assert plan.items[0].path == root
+    provenance = json.loads((root / ".biomero-import-storage.json").read_text())
+    assert provenance["storage"] == "full-zarr"
+
+
+def test_real_pruning_failure_with_failed_recovery_does_not_fall_back(tmp_path, monkeypatch):
+    root, options = _real_pruning_setup(tmp_path, monkeypatch, _failing_replace)
+
+    def broken(*args, **kwargs):
+        raise ValueError("Conflicting recovery paths; refusing data loss")
+
+    monkeypatch.setattr("biomero_shallower.transaction.recover", broken)
+    # The store recovery before evaluation succeeds; later calls fail.
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.recover",
+        Mock(side_effect=[None, ValueError("Conflicting recovery paths")]))
+
+    with pytest.raises(ValueError, match="Conflicting recovery"):
+        ImportLifecycleEngine().prepare([root], options)
+
+    assert not (root / ".biomero-import-storage.json").exists()
+
+
+def test_corrupt_metadata_during_pruning_keeps_full_result(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="eligible", reason="matched"),
+    )
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr",
+        Mock(side_effect=json.JSONDecodeError("bad", "{", 0)))
+    plan = ImportLifecycleEngine().prepare([root], _options())
+    assert [(item.path, item.role) for item in plan.items] == [(root, "primary")]
 
 
 def test_programming_error_during_pruning_still_fails(tmp_path, monkeypatch):

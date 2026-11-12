@@ -245,6 +245,18 @@ def _full_result_items(
     return tuple(items)
 
 
+def _prune_committed(root: Path) -> bool:
+    """Whether a shallow manifest exists and no prune journal is uncommitted."""
+    if not (root / SHALLOW_COLLECTION_MANIFEST).exists():
+        return False
+    for rollback in root.parent.glob(f".{root.name}.biomero-prune-*"):
+        journal = rollback / "journal.json"
+        if journal.is_file() and not json.loads(
+                journal.read_text(encoding="utf-8")).get("committed"):
+            return False
+    return True
+
+
 def _write_full_storage(
     root: Path, operation: ShallowZarrImportOperation, reason: str
 ) -> None:
@@ -418,24 +430,25 @@ class ImportLifecycleEngine:
                         decision,
                         operation.canonical_inputs.workflow_id,
                     ).manifest
-                except (PixelIdentityError, OSError) as exc:
-                    # Data or filesystem failures roll back inside
-                    # normalize_returned_zarr; keep the full result as the
-                    # remote helper does. Anything else is a bug: propagate.
-                    # Idempotent; fails loudly if the rollback is incomplete.
-                    recover(root)
-                    if (root / SHALLOW_COLLECTION_MANIFEST).exists():
-                        # Failed after the commit (e.g. cleanup): the store is a
-                        # valid shallow result if its manifest loads.
-                        manifest = _load_shallow_manifest(root)
+                except (PixelIdentityError, OSError, ValueError) as exc:
+                    # Data (corrupt metadata, identity) and filesystem failures
+                    # are expected here; anything else is a bug: propagate.
+                    if _prune_committed(root):
+                        # Failed after the commit point (e.g. cleanup): the
+                        # store is a valid shallow result if its manifest loads.
                         self.logger.warning(
-                            "Shallowing %s failed after commit (%s); "
-                            "using the committed shallow result", root, exc,
+                            "Shallowing %s failed after commit (%s); using the "
+                            "committed shallow result (a leftover prune folder "
+                            "may remain)", root, exc, exc_info=True,
                         )
+                        manifest = _load_shallow_manifest(root)
                     else:
+                        # Idempotent rollback; fails loudly if incomplete.
+                        recover(root)
                         self.logger.warning(
-                            "Shallowing %s failed (%s); importing the full result",
-                            root, exc,
+                            "Shallowing %s failed (%s); rolled back and "
+                            "importing the full result", root, exc,
+                            exc_info=True,
                         )
                         _write_full_storage(
                             root, operation, f"normalization-failed: {exc}"
