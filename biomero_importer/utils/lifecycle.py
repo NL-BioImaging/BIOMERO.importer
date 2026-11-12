@@ -437,18 +437,17 @@ class ImportLifecycleEngine:
                         # Failed after the commit point (e.g. cleanup): the
                         # store is a valid shallow result if its manifest loads.
                         self.logger.warning(
-                            "Shallowing %s failed after commit (%s); using the "
-                            "committed shallow result (a leftover prune folder "
-                            "may remain)", root, exc, exc_info=True,
+                            f"Shallowing {root} failed after commit ({exc}); "
+                            "using the committed shallow result (a leftover "
+                            "prune folder may remain)", exc_info=True,
                         )
                         manifest = _load_shallow_manifest(root)
                     else:
                         # Idempotent rollback; fails loudly if incomplete.
                         recover(root)
                         self.logger.warning(
-                            "Shallowing %s failed (%s); rolled back and "
-                            "importing the full result", root, exc,
-                            exc_info=True,
+                            f"Shallowing {root} failed ({exc}); rolled back "
+                            "and importing the full result", exc_info=True,
                         )
                         _write_full_storage(
                             root, operation, f"normalization-failed: {exc}"
