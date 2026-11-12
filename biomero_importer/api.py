@@ -11,6 +11,11 @@ from biomero_schema.imports import (
 )
 
 from .utils.ingest_tracker import STAGE_NEW_ORDER, log_ingestion_step
+from .utils.shallow_settings import (
+    DEFAULT_SHALLOW_ZARR,
+    ENV_SHALLOW_ZARR,
+    env_flag_enabled,
+)
 
 
 IMPORTER_API_SCHEMA = 1
@@ -18,12 +23,6 @@ IMPORTER_API_SCHEMA = 1
 
 class UnsupportedImportOperation(ValueError):
     """Raised when an order requests an unavailable lifecycle operation."""
-
-
-def _flag_enabled(name: str, default: bool = False) -> bool:
-    import os
-
-    return os.getenv(name, str(default)).strip().lower() == "true"
 
 
 def _identity_dependency_available() -> bool:
@@ -38,7 +37,7 @@ def get_importer_capabilities() -> dict[str, Any]:
 
     operations = []
     configuration_errors = []
-    shallow_enabled = _flag_enabled("BIOMERO_SHALLOW_ZARR")
+    shallow_enabled = env_flag_enabled(ENV_SHALLOW_ZARR, DEFAULT_SHALLOW_ZARR)
     identity_available = (
         _identity_dependency_available() if shallow_enabled else False
     )
@@ -100,7 +99,7 @@ def submit_import_order(
             operation.kind for operation in envelope.operations
         )
         if (
-            _flag_enabled("BIOMERO_SHALLOW_ZARR")
+            env_flag_enabled(ENV_SHALLOW_ZARR, DEFAULT_SHALLOW_ZARR)
             and any(
                 operation.kind == SHALLOW_ZARR_OPERATION
                 for operation in envelope.operations

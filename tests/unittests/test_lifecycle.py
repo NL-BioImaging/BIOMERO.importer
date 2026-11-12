@@ -1,5 +1,6 @@
 import errno
 import json
+import os
 from pathlib import Path
 from unittest.mock import Mock
 from uuid import UUID
@@ -25,7 +26,7 @@ from biomero_schema.zarr import (
     ZarrLabelComponent,
 )
 
-from biomero_importer.utils.lifecycle import ImportLifecycleEngine
+from biomero_importer.utils.lifecycle import ImportLifecycleEngine, _prune_committed
 from biomero_importer.utils.importer import DataPackageImporter
 from biomero_importer.utils.pixel_identity import PixelIdentityError
 from biomero_importer.utils.result_zarr import (
@@ -442,7 +443,7 @@ def test_pruning_failure_keeps_and_imports_full_result(tmp_path, monkeypatch, ca
     assert provenance["storage"] == "full-zarr"
     assert provenance["reason"].startswith("normalization-failed")
     assert "importing the full result" in caplog.text
-    assert recovered.call_count >= 2  # store recovery plus post-failure check
+    assert recovered.call_count == 2  # store recovery plus post-failure check
 
 
 def test_failure_after_commit_uses_committed_shallow_result(tmp_path, monkeypatch, caplog):
@@ -548,6 +549,62 @@ def test_corrupt_metadata_during_pruning_keeps_full_result(tmp_path, monkeypatch
         Mock(side_effect=json.JSONDecodeError("bad", "{", 0)))
     plan = ImportLifecycleEngine().prepare([root], _options())
     assert [(item.path, item.role) for item in plan.items] == [(root, "primary")]
+
+
+def _prune_state(tmp_path, journal):
+    """A store with a shallow manifest and, optionally, a prune journal."""
+    root = _zarr(tmp_path)
+    (root / ".biomero-shallow.json").write_text("{}", encoding="utf-8")
+    if journal is not None:
+        rollback = tmp_path / ".result.zarr.biomero-prune-abc"
+        rollback.mkdir()
+        (rollback / "journal.json").write_text(journal, encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize("journal, committed", [
+    (None, True),
+    ('{"committed": true}', True),
+    ('{"committed": false}', False),
+    ("not json", False),
+])
+def test_prune_committed_reads_the_journal(tmp_path, journal, committed):
+    root = _prune_state(tmp_path, journal)
+    assert _prune_committed(root, Mock()) is committed
+
+
+def test_prune_without_manifest_is_not_committed(tmp_path):
+    root = _zarr(tmp_path)
+    assert _prune_committed(root, Mock()) is False
+
+
+def test_unreadable_prune_journal_is_logged(tmp_path):
+    root = _prune_state(tmp_path, "not json")
+    logger = Mock()
+    _prune_committed(root, logger)
+    assert "treating the prune as uncommitted" in logger.warning.call_args.args[0]
+
+
+def test_failing_before_commit_rolls_back_and_imports_full(tmp_path, monkeypatch):
+    from functools import partial
+    from biomero_importer.utils.result_zarr import normalize_returned_zarr
+
+    def refuse_commit(collection):
+        raise OSError(errno.EIO, "cannot commit")
+
+    root, options = _real_pruning_setup(tmp_path, monkeypatch, os.replace)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr",
+        partial(normalize_returned_zarr, before_commit=refuse_commit))
+
+    plan = ImportLifecycleEngine().prepare([root], options)
+
+    assert (root / "0" / "0.0.0.0").is_file()
+    assert not (root / ".biomero-shallow.json").exists()
+    assert not list(tmp_path.glob(".result.zarr.biomero-prune-*"))
+    assert plan.items[0].path == root
+    provenance = json.loads((root / ".biomero-import-storage.json").read_text())
+    assert provenance["storage"] == "full-zarr"
 
 
 def test_programming_error_during_pruning_still_fails(tmp_path, monkeypatch):
@@ -717,3 +774,22 @@ def test_prepared_views_use_existing_upload_path_and_restore_envelope(tmp_path):
         "schema": 2,
         "operations": [],
     }
+
+
+def test_committed_prune_without_manifest_raises(tmp_path):
+    from biomero_importer.utils.lifecycle import _load_committed_manifest
+    with pytest.raises(PixelIdentityError, match="has no manifest"):
+        _load_committed_manifest(_zarr(tmp_path))
+
+
+@pytest.mark.parametrize("value, default, expected", [
+    (None, False, False), (None, True, True), ("TRUE", False, True),
+    (" true ", False, True), ("false", True, False), ("yes", True, False),
+])
+def test_env_flag_is_parsed_in_one_place(monkeypatch, value, default, expected):
+    from biomero_importer.utils.shallow_settings import env_flag_enabled
+    if value is None:
+        monkeypatch.delenv("FLAG_UNDER_TEST", raising=False)
+    else:
+        monkeypatch.setenv("FLAG_UNDER_TEST", value)
+    assert env_flag_enabled("FLAG_UNDER_TEST", default) is expected

@@ -10,6 +10,7 @@ from biomero_schema.shallower import RemoteShallowReceipt, SHALLOW_OPERATION_REP
 from biomero_shallower.operations import normalize
 from biomero_shallower import __version__ as shallower_version
 from biomero_importer.utils.lifecycle import ImportLifecycleEngine
+from biomero_importer.utils.result_zarr import ReturnedZarrDecision
 
 
 def fixture(tmp_path, monkeypatch, helper_version=shallower_version, provider=None):
@@ -80,11 +81,14 @@ def test_remote_result_without_receipt_is_evaluated_locally_with_warning(tmp_pat
               image='helper:0.1.0')
     options = ImportOptionsEnvelope(operations=(ShallowZarrImportOperation(
         canonicalInputs=manifest),))
+    keep_full = ReturnedZarrDecision(
+        store_path=root, outcome='keep-full', reason='pixels-differ')
     with patch('biomero_importer.utils.lifecycle.evaluate_returned_zarr',
-               side_effect=AssertionError('evaluated')),          pytest.raises(AssertionError, match='evaluated'):
+               return_value=keep_full) as evaluate:
         ImportLifecycleEngine().prepare([root], options)
+    assert evaluate.call_count == 1
     warnings = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
-    assert any('no receipt; evaluating locally' in m for m in warnings)
+    assert len([m for m in warnings if 'no receipt; evaluating locally' in m]) == 1
 
 
 def test_remote_tamper_is_rejected(tmp_path, monkeypatch):
@@ -95,6 +99,15 @@ def test_remote_tamper_is_rejected(tmp_path, monkeypatch):
         ImportLifecycleEngine().prepare([root], options)
 
 
+def _assert_single_version_warning(caplog):
+    version_warnings = [
+        record for record in caplog.records
+        if record.levelname == 'WARNING' and 'differs from installed' in record.getMessage()]
+    assert len(version_warnings) == 1
+    assert '0.0.1' in version_warnings[0].getMessage()
+    assert shallower_version in version_warnings[0].getMessage()
+
+
 def test_remote_version_mismatch_with_compatible_report_is_accepted(tmp_path, monkeypatch, caplog):
     root, options = fixture(tmp_path, monkeypatch, helper_version='0.0.1')
     plan = ImportLifecycleEngine().prepare([root], options)
@@ -103,7 +116,7 @@ def test_remote_version_mismatch_with_compatible_report_is_accepted(tmp_path, mo
     provenance = json.loads((root / '.biomero-import-storage.json').read_text())
     assert provenance['storage'] == 'shallow-zarr'
     assert provenance['tool_version'] == '0.0.1'
-    assert '0.0.1' in caplog.text and shallower_version in caplog.text
+    _assert_single_version_warning(caplog)
 
 
 def test_remote_version_mismatch_keeps_full_result(tmp_path, monkeypatch, caplog):
@@ -113,7 +126,7 @@ def test_remote_version_mismatch_keeps_full_result(tmp_path, monkeypatch, caplog
     assert [(item.path, item.role) for item in plan.items][0] == (root, 'primary')
     provenance = json.loads((root / '.biomero-import-storage.json').read_text())
     assert provenance['storage'] == 'full-zarr'
-    assert '0.0.1' in caplog.text and shallower_version in caplog.text
+    _assert_single_version_warning(caplog)
 
 
 def _receipt_for(root, options, helper_version):

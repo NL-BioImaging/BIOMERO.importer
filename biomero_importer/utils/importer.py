@@ -23,6 +23,11 @@ from omero.model import DatasetI
 from omero.sys import Parameters
 
 from .ingest_tracker import log_ingestion_step, STAGE_PREPROCESSING
+from .shallow_settings import (
+    DEFAULT_SHALLOW_ZARR,
+    ENV_SHALLOW_ZARR,
+    env_flag_enabled,
+)
 
 # Import the ImportControl from the OMERO plugins (if needed)
 ImportControl = import_module("omero.plugins.import").ImportControl
@@ -40,9 +45,7 @@ PROCESSED_DATA_FOLDER = os.getenv(
     "PROCESSED_DATA_FOLDER",
     ".processed",
 )
-SHALLOW_ZARR_ENABLED = (
-    os.getenv("BIOMERO_SHALLOW_ZARR", "false").lower() == "true"
-)
+SHALLOW_ZARR_ENABLED = env_flag_enabled(ENV_SHALLOW_ZARR, DEFAULT_SHALLOW_ZARR)
 
 # A CIFS/DFS referral reconnect can make Podman's first bind-source statfs fail
 # even though the same mount succeeds immediately afterward. Keep this exact so

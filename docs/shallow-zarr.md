@@ -56,17 +56,20 @@ transfers full results and performs shallowing on the importer host.
 `BIOMERO_SHALLOW_ZARR_WORKERS` controls local identity parallelism; choose it
 for the host's CPU and storage capacity.
 
-For remote shallowing, enable `BIOMERO_REMOTE_SHALLOW_ZARR`. The trust anchor
-for a remote result is the receipt's report checksum plus validation of the
-report and manifest by the importer's installed `biomero-shallower` package.
-The importer does not compare the receipt's image with a configured value; it
-only logs it. If the receipt reports another shallower version, the importer
-logs a warning naming both versions and the image after validation succeeds.
-A kept-full result is imported in full and a compatible shallow result is
-accepted. If the installed package cannot parse the report or manifest
-(incompatible schema), the import fails with an error naming both versions;
-install the matching `biomero-shallower` in the importer or rerun the workflow.
-A result the helper already shallowed cannot be kept full. Dependency
+For remote shallowing, enable `BIOMERO_REMOTE_SHALLOW_ZARR`. Receipt trust
+assumes that the sender of the import order, BIOMERO's own scripts, is trusted;
+this is a deliberate decision, so there is no allow-list of helper images or
+versions. The receipt's report checksum binds the report to the receipt but is
+not independent of it, because both arrive in the same import options. The
+importer also validates the report and manifest with its installed
+`biomero-shallower` package, and only logs the receipt's image. If the receipt
+reports another shallower version, the importer logs a warning naming both
+versions and the image after validation succeeds. A kept-full result is
+imported in full and a compatible shallow result is accepted. If the installed
+package cannot parse the report or manifest (incompatible schema, including
+unknown fields), the import fails with an error naming both versions; install
+the matching `biomero-shallower` in the importer or rerun the workflow. A
+result the helper already shallowed cannot be kept full. Dependency
 compatibility is maintained in `pyproject.toml`, not in this guide.
 
 The importer does not submit or download the Slurm helper. Image acquisition,
@@ -135,8 +138,11 @@ identity or filesystem errors), the transaction is rolled back, a warning is
 logged and the full result is imported, recorded as `full-zarr` with reason
 `normalization-failed: <error>`. If the failure happens after the commit point
 (for example while deleting the rollback folder), the committed shallow result
-is used and a leftover `.<name>.biomero-prune-*` folder may remain; remove it
-manually if a later import reports an incomplete recovery journal.
+is used and the next automatic recovery finishes the cleanup of the leftover
+`.<name>.biomero-prune-*` folder. Never delete that folder or its journal by
+hand: the journal is what lets recovery restore or finish a prune. Shallower
+deletes the journal last, so a missing journal with pruned arrays left behind
+cannot result from an interrupted post-commit cleanup.
 Ordinary imports without a lifecycle operation are unaffected, even when shallow
 storage is enabled. Before inspecting a shallow result,
 the importer obtains the shared
