@@ -126,6 +126,13 @@ Recovery is automatic within an explicitly requested shallow lifecycle operation
 and needs no additional feature flag. `BIOMERO_SHALLOW_ZARR=true` is still
 required; disabled shallow operations are rejected before locking or recovery.
 Remote receipts also require `BIOMERO_REMOTE_SHALLOW_ZARR` to remain enabled.
+If local shallowing fails after the eligibility check (corrupt metadata,
+identity or filesystem errors), the transaction is rolled back, a warning is
+logged and the full result is imported, recorded as `full-zarr` with reason
+`normalization-failed: <error>`. If the failure happens after the commit point
+(for example while deleting the rollback folder), the committed shallow result
+is used and a leftover `.<name>.biomero-prune-*` folder may remain; remove it
+manually if a later import reports an incomplete recovery journal.
 Ordinary imports without a lifecycle operation are unaffected, even when shallow
 storage is enabled. Before inspecting a shallow result,
 the importer obtains the shared
