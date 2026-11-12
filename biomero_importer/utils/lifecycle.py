@@ -10,7 +10,6 @@ import os
 from pathlib import Path, PurePosixPath
 from typing import Literal, Sequence
 
-from pydantic import ValidationError
 from biomero_schema.imports import (
     SHALLOW_ZARR_OPERATION,
     ImportOptionsEnvelope,
@@ -26,6 +25,7 @@ from biomero_schema.zarr import (
 from .pixel_identity import PixelIdentityError
 from .canonical_store import cache_refreshed_inputs
 from biomero_schema.shallower import SHALLOW_OPERATION_REPORT, ShallowOperationReport
+from pydantic import ValidationError
 from biomero_shallower.operations import locked, validate_report
 from biomero_shallower import __version__ as shallower_version
 from biomero_shallower.transaction import recover, write_json
