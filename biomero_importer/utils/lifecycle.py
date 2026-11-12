@@ -10,6 +10,7 @@ import os
 from pathlib import Path, PurePosixPath
 from typing import Literal, Sequence
 
+from pydantic import ValidationError
 from biomero_schema.imports import (
     SHALLOW_ZARR_OPERATION,
     ImportOptionsEnvelope,
@@ -336,13 +337,6 @@ class ImportLifecycleEngine:
                         raise ValueError("Remote shallow receipt matches multiple stores")
                     used_receipts.add(receipt.artifact_path)
                     mismatch = receipt.tool_version != shallower_version
-                    if mismatch:
-                        self.logger.warning(
-                            "Remote shallower version %s (image %s) differs from "
-                            "installed version %s; validating %s with the "
-                            "installed package",
-                            receipt.tool_version, receipt.image,
-                            shallower_version, root)
                     actual = hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
                     if actual != receipt.report_sha256:
                         raise ValueError("Remote shallow report checksum mismatch")
@@ -350,7 +344,9 @@ class ImportLifecycleEngine:
                         report = validate_report(root, operation.canonical_inputs,
                                                  image=receipt.image, tool_version=receipt.tool_version,
                                                  artifact=PurePosixPath(receipt.artifact_path).name)
-                    except Exception as exc:
+                    except (ValidationError, json.JSONDecodeError) as exc:
+                        # Only schema/parse failures suggest a version problem;
+                        # integrity failures keep their original message.
                         if not mismatch:
                             raise
                         raise ValueError(
@@ -359,6 +355,13 @@ class ImportLifecycleEngine:
                             f"compatible with installed {shallower_version}: {exc}. "
                             "Install the matching biomero-shallower in the importer "
                             "or rerun the workflow with matching versions") from exc
+                    if mismatch:
+                        self.logger.warning(
+                            "Remote shallower version %s (image %s) differs from "
+                            "installed version %s; %s validated with the "
+                            "installed package",
+                            receipt.tool_version, receipt.image,
+                            shallower_version, root)
                     if (report.result not in {"normalized", "kept-full"} or report.task_id != receipt.task_id
                             or report.slurm_job_id != receipt.slurm_job_id):
                         raise ValueError("Remote shallow task provenance mismatch")

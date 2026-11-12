@@ -72,14 +72,32 @@ def test_remote_version_mismatch_keeps_full_result(tmp_path, monkeypatch, caplog
     assert '0.0.1' in caplog.text and shallower_version in caplog.text
 
 
-def test_remote_version_mismatch_with_incompatible_report_fails_clearly(tmp_path, monkeypatch):
-    root, options = fixture(tmp_path, monkeypatch)
+def _receipt_for(root, options, helper_version):
     operation = options.operations[0]
-    receipt = operation.remote_receipts[0].model_copy(update={'tool_version': '0.0.1'})
-    options = ImportOptionsEnvelope(operations=(
+    receipt = operation.remote_receipts[0].model_copy(update={
+        'tool_version': helper_version,
+        'report_sha256': hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()})
+    return ImportOptionsEnvelope(operations=(
         operation.model_copy(update={'remote_receipts': (receipt,)}),))
-    with pytest.raises(ValueError, match=rf'0\.0\.1.*not compatible with installed {shallower_version}'):
+
+
+def test_remote_version_mismatch_with_newer_report_schema_fails_with_hint(tmp_path, monkeypatch, caplog):
+    root, options = fixture(tmp_path, monkeypatch, helper_version='0.0.1')
+    report = root / SHALLOW_OPERATION_REPORT
+    report.write_text(report.read_text().replace('"schema": 1', '"schema": 2', 1))
+    options = _receipt_for(root, options, '0.0.1')
+    with pytest.raises(ValueError, match=rf'(?s)0\.0\.1.*not compatible with installed {shallower_version}.*Install the matching'):
         ImportLifecycleEngine().prepare([root], options)
+    assert 'validated with the installed package' not in caplog.text
+
+
+def test_remote_version_mismatch_integrity_failure_keeps_original_message(tmp_path, monkeypatch):
+    root, options = fixture(tmp_path, monkeypatch, helper_version='0.0.1')
+    # Report claims another version than the receipt: an integrity failure.
+    options = _receipt_for(root, options, '0.0.2')
+    with pytest.raises(ValueError, match='Unexpected helper version') as raised:
+        ImportLifecycleEngine().prepare([root], options)
+    assert 'Install the matching' not in str(raised.value)
 
 
 def test_remote_receipt_respects_admin_opt_out(tmp_path, monkeypatch):
