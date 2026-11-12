@@ -43,6 +43,14 @@ def test_remote_result_bypasses_identity_and_normalization(tmp_path, monkeypatch
     ]
 
 
+def test_remote_receipt_decision_is_logged(tmp_path, monkeypatch, caplog):
+    root, options = fixture(tmp_path, monkeypatch)
+    with caplog.at_level('DEBUG', logger='biomero_importer.utils.lifecycle'):
+        ImportLifecycleEngine().prepare([root], options)
+    assert 'Validating remote shallow receipt' in caplog.text
+    assert 'Accepted remote shallow result' in caplog.text
+
+
 def test_remote_tamper_is_rejected(tmp_path, monkeypatch):
     root, options = fixture(tmp_path, monkeypatch)
     report = root / SHALLOW_OPERATION_REPORT

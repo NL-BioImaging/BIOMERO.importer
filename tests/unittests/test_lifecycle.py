@@ -343,6 +343,19 @@ def test_disabled_shallow_operation_cannot_start_recovery(
         ImportLifecycleEngine().prepare([_zarr(tmp_path)], _options())
 
 
+def test_full_result_fallback_is_logged_with_reason(tmp_path, monkeypatch, caplog):
+    root = _zarr(tmp_path)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="keep-full", reason="pixels-differ"),
+    )
+    ImportLifecycleEngine().prepare([root], _options())
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("pixels-differ" in r.getMessage() for r in warnings)
+
+
 def test_legacy_passthrough_decision_does_not_suppress_registration(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")

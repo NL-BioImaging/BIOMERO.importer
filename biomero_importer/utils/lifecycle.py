@@ -300,12 +300,18 @@ class ImportLifecycleEngine:
             "BIOMERO_REMOTE_SHALLOW_ZARR", "true"
         ).lower() != "true":
             raise ValueError("Remote shallow receipt consumption is disabled")
+        self.logger.debug(
+            "Preparing shallow Zarr import: %s item(s), %s remote receipt(s), "
+            "%s identity worker(s)",
+            len(current), len(operation.remote_receipts), workers,
+        )
         used_receipts = set()
         prepared = []
         decisions = []
         for item in current:
             root = item.path
             if not _is_zarr(root):
+                self.logger.debug("Not a Zarr store, skipping shallowing: %s", root)
                 prepared.append(item)
                 continue
             with _recover_result_store(root):
@@ -322,6 +328,11 @@ class ImportLifecycleEngine:
                     raise ValueError("Ambiguous remote shallow receipt")
                 if receipts:
                     receipt = receipts[0]
+                    self.logger.info(
+                        "Validating remote shallow receipt for %s (image %s, "
+                        "version %s, task %s)",
+                        root, receipt.image, receipt.tool_version, receipt.task_id,
+                    )
                     if receipt.artifact_path in used_receipts:
                         raise ValueError("Remote shallow receipt matches multiple stores")
                     used_receipts.add(receipt.artifact_path)
@@ -335,12 +346,20 @@ class ImportLifecycleEngine:
                     actual = hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
                     if actual != receipt.report_sha256:
                         raise ValueError("Remote shallow report checksum mismatch")
+                    self.logger.debug(
+                        "Remote shallow report checksum matches receipt for %s", root
+                    )
                     report = validate_report(root, operation.canonical_inputs,
                                              image=expected_image, tool_version=expected_version,
                                              artifact=PurePosixPath(receipt.artifact_path).name)
                     if (report.result not in {"normalized", "kept-full"} or report.task_id != receipt.task_id
                             or report.slurm_job_id != receipt.slurm_job_id):
                         raise ValueError("Remote shallow task provenance mismatch")
+                    self.logger.debug(
+                        "Remote shallow report for %s: result %s, reason %s, "
+                        "task and Slurm job match the receipt",
+                        root, report.result, report.reason,
+                    )
                     if report.refreshed_inputs is not None:
                         cache_refreshed_inputs(operation.canonical_inputs,
                             report.refreshed_inputs.inputs, load_managed_storage_roots())
@@ -353,14 +372,27 @@ class ImportLifecycleEngine:
                         'report_sha256': receipt.report_sha256,
                     })
                     if report.result == "kept-full":
+                        self.logger.warning(
+                            "Remote shallowing kept the full result for %s: %s",
+                            root, report.reason,
+                        )
                         remove_transfer_input_marker(root)
                         prepared.extend(_full_result_items(root, operation, item.registration))
                         continue
+                    self.logger.info(
+                        "Accepted remote shallow result for %s (%s)",
+                        root, report.reason,
+                    )
                 elif (root / SHALLOW_OPERATION_REPORT).exists():
                     attempt = ShallowOperationReport.from_dict(json.loads(
                         (root / SHALLOW_OPERATION_REPORT).read_text(encoding="utf-8")))
                     if attempt.result == "normalized":
                         raise ValueError("Remote shallow result is missing its trusted receipt")
+                    self.logger.warning(
+                        "Remote shallowing left %s with result %s (%s) and no "
+                        "receipt; evaluating locally",
+                        root, attempt.result, attempt.reason,
+                    )
                     # Preserve fallback provenance without marking the later local
                     # normalization as a remotely completed operation on retry.
                     (root / SHALLOW_OPERATION_REPORT).replace(root / ".biomero-remote-attempt.json")
@@ -398,6 +430,10 @@ class ImportLifecycleEngine:
                         "Consumed temporary Zarr input marker for %s", root
                     )
                 if not decision.eligible:
+                    self.logger.warning(
+                        "Keeping the full result for %s: %s (%s)",
+                        root, decision.outcome, decision.reason,
+                    )
                     write_json(root / '.biomero-import-storage.json', {
                         'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
                         'storage': 'full-zarr', 'location': 'importer',
@@ -407,6 +443,10 @@ class ImportLifecycleEngine:
                         root, operation, item.registration
                     ))
                     continue
+                self.logger.info(
+                    "Shallowing returned Zarr %s locally (basis: %s)",
+                    root, decision.reason,
+                )
                 normalized = normalize_returned_zarr(
                     decision,
                     operation.canonical_inputs.workflow_id,
