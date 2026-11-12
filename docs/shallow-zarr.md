@@ -56,14 +56,18 @@ transfers full results and performs shallowing on the importer host.
 `BIOMERO_SHALLOW_ZARR_WORKERS` controls local identity parallelism; choose it
 for the host's CPU and storage capacity.
 
-For remote shallowing, enable `BIOMERO_REMOTE_SHALLOW_ZARR` and configure
-`BIOMERO_REMOTE_SHALLOWER_IMAGE` and `BIOMERO_REMOTE_SHALLOWER_VERSION`
-identically on the workflow worker and importer. Select the container from
-the [shallower releases](https://github.com/NL-BioImaging/BIOMERO.shallower/releases)
-and use the Python package version reported by that container's
-`biomero-shallower --version`. Docker tag spelling and Python version spelling
-can differ for prereleases. Dependency compatibility is maintained in
-`pyproject.toml`, not in this guide.
+For remote shallowing, enable `BIOMERO_REMOTE_SHALLOW_ZARR`. The trust anchor
+for a remote result is the receipt's report checksum plus validation of the
+report and manifest by the importer's installed `biomero-shallower` package.
+The importer does not compare the receipt's image with a configured value; it
+only logs it. If the receipt reports another shallower version, the importer
+logs a warning naming both versions and the image after validation succeeds.
+A kept-full result is imported in full and a compatible shallow result is
+accepted. If the installed package cannot parse the report or manifest
+(incompatible schema), the import fails with an error naming both versions;
+install the matching `biomero-shallower` in the importer or rerun the workflow.
+A result the helper already shallowed cannot be kept full. Dependency
+compatibility is maintained in `pyproject.toml`, not in this guide.
 
 The importer does not submit or download the Slurm helper. Image acquisition,
 initialization and worker configuration are described in the

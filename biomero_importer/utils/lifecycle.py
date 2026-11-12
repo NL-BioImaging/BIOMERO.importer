@@ -25,6 +25,7 @@ from biomero_schema.zarr import (
 from .pixel_identity import PixelIdentityError
 from .canonical_store import cache_refreshed_inputs
 from biomero_schema.shallower import SHALLOW_OPERATION_REPORT, ShallowOperationReport
+from pydantic import ValidationError
 from biomero_shallower.operations import locked, validate_report
 from biomero_shallower import __version__ as shallower_version
 from biomero_shallower.transaction import recover, write_json
@@ -347,19 +348,31 @@ class ImportLifecycleEngine:
                     if receipt.artifact_path in used_receipts:
                         raise ValueError("Remote shallow receipt matches multiple stores")
                     used_receipts.add(receipt.artifact_path)
-                    expected_image = os.getenv(
-                        "BIOMERO_REMOTE_SHALLOWER_IMAGE",
-                        "cellularimagingcf/biomero-shallower:0.1.0",
-                    )
-                    expected_version = os.getenv("BIOMERO_REMOTE_SHALLOWER_VERSION", "0.1.0")
-                    if receipt.image != expected_image or receipt.tool_version != expected_version:
-                        raise ValueError("Remote shallow helper differs from administrator configuration")
+                    mismatch = receipt.tool_version != shallower_version
                     actual = hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
                     if actual != receipt.report_sha256:
                         raise ValueError("Remote shallow report checksum mismatch")
-                    report = validate_report(root, operation.canonical_inputs,
-                                             image=expected_image, tool_version=expected_version,
-                                             artifact=PurePosixPath(receipt.artifact_path).name)
+                    try:
+                        report = validate_report(root, operation.canonical_inputs,
+                                                 image=receipt.image, tool_version=receipt.tool_version,
+                                                 artifact=PurePosixPath(receipt.artifact_path).name)
+                    except (ValidationError, json.JSONDecodeError) as exc:
+                        # Only schema/parse failures suggest a version problem;
+                        # integrity failures keep their original message.
+                        if not mismatch:
+                            raise
+                        raise ValueError(
+                            f"Remote shallow result from biomero-shallower "
+                            f"{receipt.tool_version} (image {receipt.image}) is not "
+                            f"compatible with installed {shallower_version}: {exc}. "
+                            "Install the matching biomero-shallower in the importer "
+                            "or rerun the workflow with matching versions") from exc
+                    if mismatch:
+                        self.logger.warning(
+                            f"Remote shallower version {receipt.tool_version} "
+                            f"(image {receipt.image}) differs from installed "
+                            f"version {shallower_version}; {root} validated "
+                            "with the installed package")
                     if (report.result not in {"normalized", "kept-full"} or report.task_id != receipt.task_id
                             or report.slurm_job_id != receipt.slurm_job_id):
                         raise ValueError("Remote shallow task provenance mismatch")
