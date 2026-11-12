@@ -137,12 +137,25 @@ class PreparedStore:
     decision: ReturnedZarrDecision | None = None
 
 
+# Persisted keys, in order, of the three kinds of import storage records.
+_RECORD_HEAD_FIELDS = ("schema", "workflow_id", "storage", "location")
+_REMOTE_RECORD_FIELDS = _RECORD_HEAD_FIELDS + (
+    "decision_basis", "container", "tool_version", "task_id", "job_id",
+    "report_sha256",
+)
+_IMPORTER_FULL_RECORD_FIELDS = _RECORD_HEAD_FIELDS + ("tool_version", "reason")
+_IMPORTER_SHALLOW_RECORD_FIELDS = _RECORD_HEAD_FIELDS + (
+    "tool_version", "decision_basis",
+)
+
+
 @dataclass(frozen=True)
 class ImportStorageRecord:
     """Content of the versioned ``.biomero-import-storage.json`` file.
 
-    Fields that do not apply to a record (for example ``container`` for a
-    local result) are left out of the file.
+    The persisted format is read by other BIOMERO components, so each kind of
+    record keeps exactly its field set and key order; a field that applies but
+    has no value (a missing Slurm job id) is written as ``null``.
     """
 
     workflow_id: str
@@ -157,12 +170,20 @@ class ImportStorageRecord:
     report_sha256: str | None = None
     schema: int = IMPORT_STORAGE_SCHEMA_VERSION
 
+    def to_dict(self) -> dict:
+        """Serialize with the field set and key order of this kind of record."""
+        if self.location == LOCATION_REMOTE:
+            field_names = _REMOTE_RECORD_FIELDS
+        elif self.storage == STORAGE_FULL:
+            field_names = _IMPORTER_FULL_RECORD_FIELDS
+        else:
+            field_names = _IMPORTER_SHALLOW_RECORD_FIELDS
+        values = asdict(self)
+        return {name: values[name] for name in field_names}
+
     def write(self, root: Path) -> None:
         """Write the record next to the result store ``root``."""
-        write_json(root / IMPORT_STORAGE_FILENAME, {
-            field: value for field, value in asdict(self).items()
-            if value is not None
-        })
+        write_json(root / IMPORT_STORAGE_FILENAME, self.to_dict())
 
 
 def _positive_int_env(name: str, default: int, logger: logging.Logger) -> int:

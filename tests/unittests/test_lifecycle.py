@@ -806,3 +806,29 @@ def test_shared_flag_parser_is_used_by_importer_module(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(importer_module)
+
+
+def _record(**fields):
+    from biomero_importer.utils.lifecycle import ImportStorageRecord
+    return ImportStorageRecord(workflow_id="wf", **fields)
+
+
+@pytest.mark.parametrize("record, expected", [
+    (_record(storage="shallow-zarr", location="remote", decision_basis="matched",
+             container="helper:1", tool_version="1.0", task_id="t", job_id=None,
+             report_sha256="abc"),
+     '{"schema": 1, "workflow_id": "wf", "storage": "shallow-zarr", '
+     '"location": "remote", "decision_basis": "matched", "container": "helper:1", '
+     '"tool_version": "1.0", "task_id": "t", "job_id": null, "report_sha256": "abc"}'),
+    (_record(storage="shallow-zarr", location="importer", tool_version="1.0",
+             decision_basis="matched"),
+     '{"schema": 1, "workflow_id": "wf", "storage": "shallow-zarr", '
+     '"location": "importer", "tool_version": "1.0", "decision_basis": "matched"}'),
+    (_record(storage="full-zarr", location="importer", tool_version="1.0",
+             reason="pixels-differ"),
+     '{"schema": 1, "workflow_id": "wf", "storage": "full-zarr", '
+     '"location": "importer", "tool_version": "1.0", "reason": "pixels-differ"}'),
+])
+def test_import_storage_record_keeps_its_persisted_format(record, expected):
+    # Other BIOMERO components read this file: pin field set, null and order.
+    assert json.dumps(record.to_dict()) == expected
