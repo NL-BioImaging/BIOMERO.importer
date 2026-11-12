@@ -343,17 +343,23 @@ def test_disabled_shallow_operation_cannot_start_recovery(
         ImportLifecycleEngine().prepare([_zarr(tmp_path)], _options())
 
 
-def test_full_result_fallback_is_logged_with_reason(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize("reason, level", [
+    ("pixels-differ", "INFO"),
+    ("identity-unavailable: boom", "WARNING"),
+])
+def test_keep_full_decision_is_logged_at_matching_level(tmp_path, monkeypatch, caplog, reason, level):
     root = _zarr(tmp_path)
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
     monkeypatch.setattr(
         "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
         lambda *args, **kwargs: ReturnedZarrDecision(
-            store_path=root, outcome="keep-full", reason="pixels-differ"),
+            store_path=root, outcome="keep-full", reason=reason),
     )
-    ImportLifecycleEngine().prepare([root], _options())
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert any("pixels-differ" in r.getMessage() for r in warnings)
+    with caplog.at_level("INFO", logger="biomero_importer.utils.lifecycle"):
+        ImportLifecycleEngine().prepare([root], _options())
+    records = [r for r in caplog.records
+               if "Returned Zarr decision" in r.getMessage() and reason in r.getMessage()]
+    assert [r.levelname for r in records] == [level]
 
 
 def test_legacy_passthrough_decision_does_not_suppress_registration(tmp_path, monkeypatch):

@@ -245,6 +245,19 @@ def _full_result_items(
     return tuple(items)
 
 
+# keep-full reasons that signal a failure rather than an expected comparison.
+_KEEP_FULL_FAILURE_PREFIXES = (
+    "normalization-failed", "unsupported-", "identity-unavailable",
+    "label-identity-unavailable", "invalid-", "untrusted-",
+)
+
+
+def _keep_full_level(reason: str) -> int:
+    """WARNING for genuine failures, INFO for expected keep-full outcomes."""
+    return (logging.WARNING if reason.startswith(_KEEP_FULL_FAILURE_PREFIXES)
+            else logging.INFO)
+
+
 class ImportLifecycleEngine:
     """Execute optional native operations without knowing register.py."""
 
@@ -328,14 +341,14 @@ class ImportLifecycleEngine:
                     raise ValueError("Ambiguous remote shallow receipt")
                 if receipts:
                     receipt = receipts[0]
+                    if receipt.artifact_path in used_receipts:
+                        raise ValueError("Remote shallow receipt matches multiple stores")
+                    used_receipts.add(receipt.artifact_path)
                     self.logger.info(
                         "Validating remote shallow receipt for %s (image %s, "
                         "version %s, task %s)",
                         root, receipt.image, receipt.tool_version, receipt.task_id,
                     )
-                    if receipt.artifact_path in used_receipts:
-                        raise ValueError("Remote shallow receipt matches multiple stores")
-                    used_receipts.add(receipt.artifact_path)
                     expected_image = os.getenv(
                         "BIOMERO_REMOTE_SHALLOWER_IMAGE",
                         "cellularimagingcf/biomero-shallower:0.1.0",
@@ -372,7 +385,8 @@ class ImportLifecycleEngine:
                         'report_sha256': receipt.report_sha256,
                     })
                     if report.result == "kept-full":
-                        self.logger.warning(
+                        self.logger.log(
+                            _keep_full_level(report.reason),
                             "Remote shallowing kept the full result for %s: %s",
                             root, report.reason,
                         )
@@ -396,8 +410,12 @@ class ImportLifecycleEngine:
                     # Preserve fallback provenance without marking the later local
                     # normalization as a remotely completed operation on retry.
                     (root / SHALLOW_OPERATION_REPORT).replace(root / ".biomero-remote-attempt.json")
+                else:
+                    self.logger.debug(
+                        "No remote receipt or report for %s; using local "
+                        "shallowing", root)
                 if existing is not None:
-                    self.logger.info(
+                    self.logger.debug(
                         "Reusing existing shallow Zarr manifest for %s", root
                     )
                     prepared.extend(_items_for_shallow_manifest(
@@ -419,7 +437,9 @@ class ImportLifecycleEngine:
                 if decision.refreshed_inputs:
                     cache_refreshed_inputs(operation.canonical_inputs,
                         decision.refreshed_inputs, load_managed_storage_roots())
-                self.logger.info(
+                self.logger.log(
+                    _keep_full_level(decision.reason)
+                    if decision.outcome == "keep-full" else logging.INFO,
                     "Returned Zarr decision for %s: %s (%s)",
                     root,
                     decision.outcome,
@@ -430,10 +450,6 @@ class ImportLifecycleEngine:
                         "Consumed temporary Zarr input marker for %s", root
                     )
                 if not decision.eligible:
-                    self.logger.warning(
-                        "Keeping the full result for %s: %s (%s)",
-                        root, decision.outcome, decision.reason,
-                    )
                     write_json(root / '.biomero-import-storage.json', {
                         'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
                         'storage': 'full-zarr', 'location': 'importer',
