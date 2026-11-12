@@ -1,3 +1,19 @@
+# -*- coding: utf-8 -*-
+# Copyright (C) 2026 Torec Luik
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 """Registration-independent lifecycle operations for importer orders."""
 
 from contextlib import ExitStack, contextmanager
@@ -8,7 +24,7 @@ import json
 import logging
 import os
 from pathlib import Path, PurePosixPath
-from typing import Literal, Sequence
+from typing import Iterator, Literal, Sequence
 
 from pydantic import ValidationError
 
@@ -99,7 +115,14 @@ ROLE_PLATE_LABEL_PREVIEW = "plate-label-preview"
 
 @dataclass(frozen=True)
 class PreparedImportItem:
-    """One physical path and registration view produced by the lifecycle."""
+    """
+    One physical path and registration view produced by the lifecycle.
+
+    Attributes:
+        path (Path): Where the item lives on disk.
+        registration (ZarrImportOptions): How the item is registered.
+        role (str): One of the ``ROLE_*`` values defined above.
+    """
 
     path: Path
     registration: ZarrImportOptions
@@ -111,7 +134,15 @@ class PreparedImportItem:
 
 @dataclass(frozen=True)
 class PreparedImportPlan:
-    """Deterministic importer inputs after all requested native operations."""
+    """
+    Deterministic importer inputs after all requested native operations.
+
+    Attributes:
+        items (tuple[PreparedImportItem, ...]): What to register.
+        options (ImportOptionsEnvelope): The options of the import order.
+        decisions (tuple[ReturnedZarrDecision, ...]): Local evaluation
+            decisions, one per locally evaluated store.
+    """
 
     items: tuple[PreparedImportItem, ...]
     options: ImportOptionsEnvelope
@@ -119,18 +150,26 @@ class PreparedImportPlan:
 
     @property
     def changed(self) -> bool:
-        """Whether any lifecycle operation was requested."""
+        """
+        Whether any lifecycle operation was requested.
+
+        Returns:
+            bool: True if the import options contain at least one operation.
+        """
         return bool(self.options.operations)
 
 
 @dataclass(frozen=True)
 class PreparedStore:
-    """The outcome of preparing one Zarr store.
+    """
+    The outcome of preparing one Zarr store.
 
     Attributes:
-        items: What to register for the store.
-        decision: The local evaluation decision, None when the store was
-            decided remotely or reused without evaluation.
+        items (tuple[PreparedImportItem, ...]): What to register for the
+            store.
+        decision (ReturnedZarrDecision | None): The local evaluation
+            decision, None when the store was decided remotely or reused
+            without evaluation.
     """
 
     items: tuple[PreparedImportItem, ...]
@@ -151,11 +190,25 @@ _IMPORTER_SHALLOW_RECORD_FIELDS = _RECORD_HEAD_FIELDS + (
 
 @dataclass(frozen=True)
 class ImportStorageRecord:
-    """Content of the versioned ``.biomero-import-storage.json`` file.
+    """
+    Content of the versioned ``.biomero-import-storage.json`` file.
 
     The persisted format is read by other BIOMERO components, so each kind of
     record keeps exactly its field set and key order; a field that applies but
     has no value (a missing Slurm job id) is written as ``null``.
+
+    Attributes:
+        workflow_id (str): The workflow the result belongs to.
+        storage (str): ``STORAGE_SHALLOW`` or ``STORAGE_FULL``.
+        location (str): ``LOCATION_REMOTE`` or ``LOCATION_IMPORTER``.
+        tool_version (str | None): Shallower version that handled the result.
+        decision_basis (str | None): Why the result was shallowed.
+        reason (str | None): Why the full result was kept.
+        container (str | None): Remote helper image.
+        task_id (str | None): Remote helper task.
+        job_id (str | None): Slurm job of the remote helper.
+        report_sha256 (str | None): Checksum of the remote report.
+        schema (int): Version of this record format.
     """
 
     workflow_id: str
@@ -171,7 +224,12 @@ class ImportStorageRecord:
     schema: int = IMPORT_STORAGE_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
-        """Serialize with the field set and key order of this kind of record."""
+        """
+        Serialize with the field set and key order of this kind of record.
+
+        Returns:
+            dict: The record as persisted, in key order.
+        """
         if self.location == LOCATION_REMOTE:
             field_names = _REMOTE_RECORD_FIELDS
         elif self.storage == STORAGE_FULL:
@@ -182,12 +240,27 @@ class ImportStorageRecord:
         return {name: values[name] for name in field_names}
 
     def write(self, root: Path) -> None:
-        """Write the record next to the result store ``root``."""
+        """
+        Write the record next to the result store.
+
+        Args:
+            root (Path): The result store the record describes.
+        """
         write_json(root / IMPORT_STORAGE_FILENAME, self.to_dict())
 
 
 def _positive_int_env(name: str, default: int, logger: logging.Logger) -> int:
-    """Read a positive integer setting, falling back to ``default`` if invalid."""
+    """
+    Read a positive integer setting, falling back to a default if invalid.
+
+    Args:
+        name (str): Environment variable to read.
+        default (int): Value used when the variable is unset or invalid.
+        logger (logging.Logger): Logger for the invalid-value warning.
+
+    Returns:
+        int: The parsed value, or ``default``.
+    """
     value = os.getenv(name)
     if value is None:
         return default
@@ -202,7 +275,15 @@ def _positive_int_env(name: str, default: int, logger: logging.Logger) -> int:
 
 
 def _is_zarr(path: Path) -> bool:
-    """Whether ``path`` is a Zarr store, by suffix or Zarr v2/v3 metadata."""
+    """
+    Check whether a path is a Zarr store, by suffix or Zarr v2/v3 metadata.
+
+    Args:
+        path (Path): The path to check.
+
+    Returns:
+        bool: True if the path is a directory that looks like a Zarr store.
+    """
     return path.is_dir() and (
         path.name.lower().endswith(ZARR_DIRECTORY_SUFFIX)
         or (path / ZARR_V2_ATTRIBUTES_FILENAME).is_file()
@@ -211,7 +292,15 @@ def _is_zarr(path: Path) -> bool:
 
 
 def _require_no_pending_prune(root: Path) -> None:
-    """Refuse to continue without locking while a prune is still pending."""
+    """
+    Refuse to continue without locking while a prune is still pending.
+
+    Args:
+        root (Path): The result store.
+
+    Raises:
+        ValueError: If an interrupted prune has left a rollback folder.
+    """
     if next(iter(rollback_folders(root)), None) is not None:
         raise ValueError(
             "Interrupted shallow transaction needs recovery on storage "
@@ -219,8 +308,24 @@ def _require_no_pending_prune(root: Path) -> None:
 
 
 @contextmanager
-def _recover_result_store(root: Path):
-    """Recover automatically, using legacy preparation if locks are unsupported."""
+def _recover_result_store(root: Path) -> Iterator[None]:
+    """
+    Recover an interrupted prune of a store while holding its lock.
+
+    Falls back to legacy preparation, without recovery or concurrency
+    protection, when the filesystem does not support locks.
+
+    Args:
+        root (Path): The result store to lock and recover.
+
+    Yields:
+        None: While the lock (if any) is held.
+
+    Raises:
+        ValueError: If the store is a symlink, or a prune is pending on a
+            filesystem without lock support.
+        OSError: If locking fails for a reason other than missing support.
+    """
     if root.is_symlink():
         raise ValueError("Cannot normalize a symlinked Zarr store")
     with ExitStack() as stack:
@@ -242,7 +347,14 @@ def _recover_result_store(root: Path):
 
 
 def _load_shallow_manifest(path: Path) -> ShallowManifest | None:
-    """Load the shallow manifest of a store, or None if it has none.
+    """
+    Load the shallow manifest of a store, or None if it has none.
+
+    Args:
+        path (Path): The result store.
+
+    Returns:
+        ShallowManifest | None: The parsed manifest, or None if absent.
 
     Raises:
         PixelIdentityError: If the manifest exists but cannot be parsed.
@@ -261,7 +373,14 @@ def _load_shallow_manifest(path: Path) -> ShallowManifest | None:
 
 
 def _load_committed_manifest(root: Path) -> ShallowManifest:
-    """Load the manifest of a committed prune, which must exist.
+    """
+    Load the manifest of a committed prune, which must exist.
+
+    Args:
+        root (Path): The result store.
+
+    Returns:
+        ShallowManifest: The parsed manifest.
 
     Raises:
         PixelIdentityError: If the manifest is missing or invalid.
@@ -278,16 +397,17 @@ def _common_plate_label(
     manifest: ShallowManifest,
     requested: str | None,
 ) -> str | None:
-    """Pick the label every plate image has, to show as the plate preview.
+    """
+    Pick the label every plate image has, to show as the plate preview.
 
     Args:
-        manifest: The shallow manifest of the result.
-        requested: The label asked for in the order, if any.
+        manifest (ShallowManifest): The shallow manifest of the result.
+        requested (str | None): The label asked for in the order, if any.
 
     Returns:
-        The requested label if every image has it, otherwise the only label
-        shared by all images, or None when there is no unambiguous choice or
-        a source is not a plate.
+        str | None: The requested label if every image has it, otherwise the
+        only label shared by all images; None when there is no unambiguous
+        choice or a source is not a plate.
     """
     label_names_per_image = []
     for image in manifest.collection.images:
@@ -325,7 +445,16 @@ def _items_for_shallow_manifest(
     manifest: ShallowManifest,
     operation: ShallowZarrImportOperation,
 ) -> tuple[PreparedImportItem, ...]:
-    """Plan the registration items of a shallow result.
+    """
+    Plan the registration items of a shallow result.
+
+    Args:
+        root (Path): The result store.
+        manifest (ShallowManifest): The shallow manifest of the result.
+        operation (ShallowZarrImportOperation): The requested operation.
+
+    Returns:
+        tuple[PreparedImportItem, ...]: The items to register.
 
     Raises:
         PixelIdentityError: If the collection mixes Image and Plate sources.
@@ -347,7 +476,17 @@ def _plate_items(
     manifest: ShallowManifest,
     operation: ShallowZarrImportOperation,
 ) -> tuple[PreparedImportItem, ...]:
-    """Register the plate, plus a label preview view if one can be chosen."""
+    """
+    Plan the registration of a plate, plus a label preview view if requested.
+
+    Args:
+        root (Path): The result store.
+        manifest (ShallowManifest): The shallow manifest of the result.
+        operation (ShallowZarrImportOperation): The requested operation.
+
+    Returns:
+        tuple[PreparedImportItem, ...]: The plate and optional preview items.
+    """
     items = [PreparedImportItem(
         path=root,
         registration=ZarrImportOptions(),
@@ -373,7 +512,17 @@ def _image_items(
     manifest: ShallowManifest,
     operation: ShallowZarrImportOperation,
 ) -> tuple[PreparedImportItem, ...]:
-    """Register the collection root, plus label views if requested."""
+    """
+    Plan the registration of the collection root, plus label views if requested.
+
+    Args:
+        root (Path): The result store.
+        manifest (ShallowManifest): The shallow manifest of the result.
+        operation (ShallowZarrImportOperation): The requested operation.
+
+    Returns:
+        tuple[PreparedImportItem, ...]: The root and optional label items.
+    """
     # The collection root is the user-facing workflow result. Its registered
     # PixelBuffer resolves to the canonical source pixels while the attached
     # shallow reference exposes every result label to label-aware viewers.
@@ -408,7 +557,17 @@ def _full_result_items(
     operation: ShallowZarrImportOperation,
     registration: ZarrImportOptions,
 ) -> tuple[PreparedImportItem, ...]:
-    """Plan the registration of an unpruned result and its label views."""
+    """
+    Plan the registration of an unpruned result and its label views.
+
+    Args:
+        root (Path): The result store.
+        operation (ShallowZarrImportOperation): The requested operation.
+        registration (ZarrImportOptions): Registration options of the result.
+
+    Returns:
+        tuple[PreparedImportItem, ...]: The result and optional label items.
+    """
     items = [PreparedImportItem(root, registration, ROLE_PRIMARY)]
     if not operation.import_image_label_views:
         return tuple(items)
@@ -435,10 +594,18 @@ def _full_result_items(
 
 
 def _prune_committed(root: Path, logger: logging.Logger) -> bool:
-    """Whether a prune of ``root`` committed, so its manifest is the result.
+    """
+    Check whether a prune of a store committed, so its manifest is the result.
 
     A manifest next to an uncommitted (or unreadable) prune journal means the
     prune was interrupted before the commit point and must be rolled back.
+
+    Args:
+        root (Path): The result store.
+        logger (logging.Logger): Logger for an unreadable journal.
+
+    Returns:
+        bool: True if the prune committed.
     """
     try:
         return prune_was_committed(root)
@@ -451,14 +618,29 @@ def _prune_committed(root: Path, logger: logging.Logger) -> bool:
 
 
 def _sha256_of_file(path: Path) -> str:
-    """Return the hex SHA-256 digest of a file's bytes."""
+    """
+    Return the hex SHA-256 digest of a file's bytes.
+
+    Args:
+        path (Path): The file to hash.
+
+    Returns:
+        str: The hex digest.
+    """
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _write_full_storage(
     root: Path, operation: ShallowZarrImportOperation, reason: str
 ) -> None:
-    """Record that the importer kept the full result, and why."""
+    """
+    Record that the importer kept the full result, and why.
+
+    Args:
+        root (Path): The result store.
+        operation (ShallowZarrImportOperation): The requested operation.
+        reason (str): Why the full result was kept.
+    """
     ImportStorageRecord(
         workflow_id=str(operation.canonical_inputs.workflow_id),
         storage=STORAGE_FULL,
@@ -469,14 +651,31 @@ def _write_full_storage(
 
 
 def _keep_full_level(reason: str) -> int:
-    """WARNING for genuine failures, INFO for expected keep-full outcomes."""
+    """
+    Choose the log level of a keep-full reason.
+
+    Args:
+        reason (str): The keep-full reason.
+
+    Returns:
+        int: WARNING for genuine failures, INFO for expected outcomes.
+    """
     return logging.WARNING if is_failure_reason(reason) else logging.INFO
 
 
 class ImportLifecycleEngine:
-    """Execute optional native operations without knowing register.py."""
+    """
+    Execute optional native operations without knowing register.py.
+    """
 
     def __init__(self, logger: logging.Logger | None = None):
+        """
+        Create the engine.
+
+        Args:
+            logger (logging.Logger, optional): Logger for the lifecycle
+                decisions. Defaults to this module's logger.
+        """
         self.logger = logger or logging.getLogger(__name__)
 
     def prepare(
@@ -484,14 +683,18 @@ class ImportLifecycleEngine:
         files: Sequence[str | Path],
         options: ImportOptionsEnvelope | dict | None,
     ) -> PreparedImportPlan:
-        """Apply the operations requested in ``options`` to the files.
+        """
+        Apply the operations requested in the import options to the files.
 
         Args:
-            files: Paths of the files or stores of the order.
-            options: Import options, as an envelope or its dict form.
+            files (Sequence[str | Path]): Paths of the files or stores of the
+                order.
+            options (ImportOptionsEnvelope | dict | None): Import options, as an
+                envelope or its dict form.
 
         Returns:
-            The items to register, the options and the local decisions.
+            PreparedImportPlan: The items to register, the options and the local
+            decisions.
 
         Raises:
             ValueError: If an operation is unsupported or cannot be applied.
@@ -519,14 +722,18 @@ class ImportLifecycleEngine:
         current: tuple[PreparedImportItem, ...],
         operation: ShallowZarrImportOperation,
     ) -> tuple[tuple[PreparedImportItem, ...], tuple[ReturnedZarrDecision, ...]]:
-        """Shallow every Zarr store in ``current`` or keep its full result.
+        """
+        Shallow every Zarr store in the items or keep its full result.
 
         Args:
-            current: Items produced by the previous lifecycle step.
-            operation: The requested shallow-Zarr operation, including any
-                receipts of results that were shallowed remotely.
+            current (tuple[PreparedImportItem, ...]): Items produced by the
+                previous lifecycle step.
+            operation (ShallowZarrImportOperation): The requested shallow-Zarr
+                operation, including any receipts of results that were shallowed
+                remotely.
 
         Returns:
+            tuple[tuple[PreparedImportItem, ...], tuple[ReturnedZarrDecision, ...]]:
             The items to register and the local evaluation decisions.
 
         Raises:
@@ -575,7 +782,16 @@ class ImportLifecycleEngine:
     def _require_shallow_enabled(
         self, operation: ShallowZarrImportOperation
     ) -> None:
-        """Reject operations that the administrator has not enabled."""
+        """
+        Reject operations that the administrator has not enabled.
+
+        Args:
+            operation (ShallowZarrImportOperation): The requested operation.
+
+        Raises:
+            ValueError: If shallowing, or remote receipt consumption for an
+                operation with receipts, is disabled.
+        """
         if not env_flag_enabled(ENV_SHALLOW_ZARR, DEFAULT_SHALLOW_ZARR):
             raise ValueError(
                 f"biomero.shallow-zarr requested but {ENV_SHALLOW_ZARR} is disabled"
@@ -592,16 +808,20 @@ class ImportLifecycleEngine:
         operation: ShallowZarrImportOperation,
         identity_workers: int,
     ) -> PreparedStore:
-        """Prepare one locked Zarr store: remote result, reuse or local shallowing.
+        """
+        Prepare one locked Zarr store: remote result, reuse or local shallowing.
 
         This may write provenance files and prune the store.
 
         Args:
-            item: The store to prepare.
-            receipt: The store's remote receipt, None if it was not shallowed
-                remotely.
-            operation: The requested shallow-Zarr operation.
-            identity_workers: Parallelism of the local identity evaluation.
+            item (PreparedImportItem): The store to prepare.
+            receipt (RemoteShallowReceipt | None): The store's remote receipt,
+                None if it was not shallowed remotely.
+            operation (ShallowZarrImportOperation): The requested operation.
+            identity_workers (int): Parallelism of the local identity evaluation.
+
+        Returns:
+            PreparedStore: The items to register and the local decision, if any.
         """
         root = item.path
         existing_manifest = _load_shallow_manifest(root)
@@ -637,13 +857,19 @@ class ImportLifecycleEngine:
         root: Path,
         operation: ShallowZarrImportOperation,
     ) -> RemoteShallowReceipt | None:
-        """Find the remote receipt of ``root``.
+        """
+        Find the remote receipt of a store.
 
         A receipt matches by artifact path or, after the user renamed the
         result, by the checksum of the unchanged remote report.
 
+        Args:
+            root (Path): The result store.
+            operation (ShallowZarrImportOperation): The requested operation,
+                holding the remote receipts.
+
         Returns:
-            The matching receipt, or None if ``root`` has none.
+            RemoteShallowReceipt | None: The matching receipt, or None.
 
         Raises:
             ValueError: If several receipts match.
@@ -680,11 +906,17 @@ class ImportLifecycleEngine:
         receipt: RemoteShallowReceipt,
         operation: ShallowZarrImportOperation,
     ) -> ShallowOperationReport:
-        """Validate a remotely shallowed result and record how it was stored.
+        """
+        Validate a remotely shallowed result and record how it was stored.
+
+        Args:
+            root (Path): The result store.
+            receipt (RemoteShallowReceipt): The receipt of the remote helper.
+            operation (ShallowZarrImportOperation): The requested operation.
 
         Returns:
-            The validated remote report; its ``result`` says whether the
-            helper kept the full result or pruned it.
+            ShallowOperationReport: The validated remote report; its ``result``
+            says whether the helper kept the full result or pruned it.
         """
         report = self._validate_remote_receipt(root, receipt, operation)
         if report.refreshed_inputs is not None:
@@ -723,17 +955,26 @@ class ImportLifecycleEngine:
         receipt: RemoteShallowReceipt,
         operation: ShallowZarrImportOperation,
     ) -> ShallowOperationReport:
-        """Check a remote result against its receipt and the installed shallower.
+        """
+        Check a remote result against its receipt and the installed shallower.
 
         The receipt arrives in the same import options as the checksum it
         carries, so the checksum is not independent of the receipt: trust
         relies on BIOMERO orchestrating the import options. The receipt's
         image and version are logged, not compared with a configured value.
 
+        Args:
+            root (Path): The result store.
+            receipt (RemoteShallowReceipt): The receipt of the remote helper.
+            operation (ShallowZarrImportOperation): The requested operation.
+
+        Returns:
+            ShallowOperationReport: The validated remote report.
+
         Raises:
             ValueError: If the checksum, report, manifest or task provenance
-                does not match, or the installed package cannot parse the
-                result of another shallower version.
+                does not match, or the installed package cannot parse the result
+                of another shallower version.
         """
         self.logger.info(
             f"Validating remote shallow receipt for {root} (image "
@@ -768,11 +1009,20 @@ class ImportLifecycleEngine:
         receipt: RemoteShallowReceipt,
         operation: ShallowZarrImportOperation,
     ) -> ShallowOperationReport:
-        """Parse and validate the remote report and manifest.
+        """
+        Parse and validate the remote report and manifest.
 
         A different shallower version only produces a warning (after the
         installed package accepted the result); the error of a result the
         installed package cannot parse names both versions.
+
+        Args:
+            root (Path): The result store.
+            receipt (RemoteShallowReceipt): The receipt of the remote helper.
+            operation (ShallowZarrImportOperation): The requested operation.
+
+        Returns:
+            ShallowOperationReport: The validated remote report.
 
         Raises:
             ValueError: If validation fails; schema/parse failures of another
@@ -806,11 +1056,15 @@ class ImportLifecycleEngine:
         return report
 
     def _set_aside_remote_attempt(self, root: Path) -> None:
-        """Handle a remote report that has no receipt.
+        """
+        Handle a remote report that has no receipt.
+
+        Args:
+            root (Path): The result store.
 
         Raises:
-            ValueError: If the remote helper already pruned the result, since
-                it cannot be trusted or restored without its receipt.
+            ValueError: If the remote helper already pruned the result, since it
+                cannot be trusted or restored without its receipt.
         """
         report_path = root / SHALLOW_OPERATION_REPORT
         remote_attempt_report = ShallowOperationReport.from_dict(json.loads(
@@ -832,7 +1086,17 @@ class ImportLifecycleEngine:
         operation: ShallowZarrImportOperation,
         identity_workers: int,
     ) -> ReturnedZarrDecision:
-        """Compare the returned store with its canonical inputs."""
+        """
+        Compare the returned store with its canonical inputs.
+
+        Args:
+            root (Path): The result store.
+            operation (ShallowZarrImportOperation): The requested operation.
+            identity_workers (int): Parallelism of the identity evaluation.
+
+        Returns:
+            ReturnedZarrDecision: Whether the store may be shallowed, and why.
+        """
         self.logger.info(
             f"Evaluating returned Zarr {root} with {identity_workers} "
             "identity worker(s)"
@@ -867,7 +1131,17 @@ class ImportLifecycleEngine:
         decision: ReturnedZarrDecision,
         operation: ShallowZarrImportOperation,
     ) -> tuple[PreparedImportItem, ...]:
-        """Prune a verified duplicate result, keeping the full result on failure."""
+        """
+        Prune a verified duplicate result, keeping the full result on failure.
+
+        Args:
+            item (PreparedImportItem): The store to prune.
+            decision (ReturnedZarrDecision): The eligible local decision.
+            operation (ShallowZarrImportOperation): The requested operation.
+
+        Returns:
+            tuple[PreparedImportItem, ...]: The items to register.
+        """
         root = item.path
         self.logger.info(
             f"Shallowing returned Zarr {root} locally (basis: {decision.reason})"
@@ -911,7 +1185,17 @@ class ImportLifecycleEngine:
         operation: ShallowZarrImportOperation,
         failure: Exception,
     ) -> tuple[PreparedImportItem, ...]:
-        """Roll back a failed prune and import the full result instead."""
+        """
+        Roll back a failed prune and import the full result instead.
+
+        Args:
+            item (PreparedImportItem): The store whose prune failed.
+            operation (ShallowZarrImportOperation): The requested operation.
+            failure (Exception): The error that failed the prune.
+
+        Returns:
+            tuple[PreparedImportItem, ...]: The items of the full result.
+        """
         root = item.path
         # Idempotent rollback; fails loudly if incomplete.
         recover(root)
