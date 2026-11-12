@@ -248,7 +248,8 @@ def _full_result_items(
 # keep-full reasons that signal a failure rather than an expected comparison.
 _KEEP_FULL_FAILURE_PREFIXES = (
     "normalization-failed", "unsupported-", "identity-unavailable",
-    "label-identity-unavailable", "invalid-", "untrusted-",
+    "label-identity-unavailable", "invalid-", "untrusted-", "ambiguous-",
+    "no-canonical-input-snapshot",
 )
 
 
@@ -339,6 +340,9 @@ class ImportLifecycleEngine:
                                 if receipt.report_sha256 == checksum]
                 if len(receipts) > 1:
                     raise ValueError("Ambiguous remote shallow receipt")
+                self.logger.debug(
+                    "Matched %s remote receipt(s) for %s by artifact path or "
+                    "report checksum", len(receipts), root)
                 if receipts:
                     receipt = receipts[0]
                     if receipt.artifact_path in used_receipts:
