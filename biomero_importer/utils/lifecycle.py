@@ -335,34 +335,30 @@ class ImportLifecycleEngine:
                     if receipt.artifact_path in used_receipts:
                         raise ValueError("Remote shallow receipt matches multiple stores")
                     used_receipts.add(receipt.artifact_path)
-                    if receipt.tool_version != shallower_version:
-                        # Remote pruning cannot be undone, so only a full
-                        # result can be kept; the receipt is not trusted.
-                        attempt = ShallowOperationReport.from_dict(json.loads(
-                            (root / SHALLOW_OPERATION_REPORT).read_text(encoding="utf-8")))
-                        if attempt.result == "normalized":
-                            raise ValueError(
-                                "Remote shallow result was produced by "
-                                f"biomero-shallower {receipt.tool_version} "
-                                f"(image {receipt.image}) but this importer has "
-                                f"{shallower_version}; the pruned result cannot "
-                                "be verified")
+                    mismatch = receipt.tool_version != shallower_version
+                    if mismatch:
                         self.logger.warning(
                             "Remote shallower version %s (image %s) differs from "
-                            "installed version %s; importing the full result of %s",
+                            "installed version %s; validating %s with the "
+                            "installed package",
                             receipt.tool_version, receipt.image,
                             shallower_version, root)
-                        remove_transfer_input_marker(root)
-                        _write_full_storage(
-                            root, operation, "remote-shallower-version-mismatch")
-                        prepared.extend(_full_result_items(root, operation, item.registration))
-                        continue
                     actual = hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
                     if actual != receipt.report_sha256:
                         raise ValueError("Remote shallow report checksum mismatch")
-                    report = validate_report(root, operation.canonical_inputs,
-                                             image=receipt.image, tool_version=shallower_version,
-                                             artifact=PurePosixPath(receipt.artifact_path).name)
+                    try:
+                        report = validate_report(root, operation.canonical_inputs,
+                                                 image=receipt.image, tool_version=receipt.tool_version,
+                                                 artifact=PurePosixPath(receipt.artifact_path).name)
+                    except Exception as exc:
+                        if not mismatch:
+                            raise
+                        raise ValueError(
+                            f"Remote shallow result from biomero-shallower "
+                            f"{receipt.tool_version} (image {receipt.image}) is not "
+                            f"compatible with installed {shallower_version}: {exc}. "
+                            "Install the matching biomero-shallower in the importer "
+                            "or rerun the workflow with matching versions") from exc
                     if (report.result not in {"normalized", "kept-full"} or report.task_id != receipt.task_id
                             or report.slurm_job_id != receipt.slurm_job_id):
                         raise ValueError("Remote shallow task provenance mismatch")

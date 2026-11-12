@@ -1,6 +1,5 @@
 import hashlib
 import json
-import shutil
 from unittest.mock import patch
 
 import pytest
@@ -13,7 +12,7 @@ from biomero_shallower import __version__ as shallower_version
 from biomero_importer.utils.lifecycle import ImportLifecycleEngine
 
 
-def fixture(tmp_path, monkeypatch):
+def fixture(tmp_path, monkeypatch, helper_version=shallower_version, provider=None):
     root = tmp_path / 'result.zarr'
     _make_image(root, labels=('cells',))
     manifest = _manifest(_input(0))
@@ -21,9 +20,10 @@ def fixture(tmp_path, monkeypatch):
     monkeypatch.setenv('BIOMERO_REMOTE_SHALLOW_ZARR', 'true')
     monkeypatch.setenv('SLURM_JOB_ID', '123')
     task_id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
-    normalize(root, manifest, identity_provider=IdentityProvider(_identity()),
-              image='helper:0.1.0', task_id=task_id)
-    receipt = RemoteShallowReceipt(schema=1, image='helper:0.1.0', toolVersion=shallower_version,
+    with patch('biomero_shallower.operations.__version__', helper_version):
+        normalize(root, manifest, identity_provider=provider or IdentityProvider(_identity()),
+                  image='helper:0.1.0', task_id=task_id)
+    receipt = RemoteShallowReceipt(schema=1, image='helper:0.1.0', toolVersion=helper_version,
                                    artifactPath='result.zarr', slurmJobId='123', taskId=task_id,
                                    reportSha256=hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest())
     options = ImportOptionsEnvelope(operations=(ShallowZarrImportOperation(
@@ -51,37 +51,35 @@ def test_remote_tamper_is_rejected(tmp_path, monkeypatch):
         ImportLifecycleEngine().prepare([root], options)
 
 
-def _with_receipt_version(options, version):
-    operation = options.operations[0]
-    receipt = operation.remote_receipts[0].model_copy(update={'tool_version': version})
-    return ImportOptionsEnvelope(operations=(
-        operation.model_copy(update={'remote_receipts': (receipt,)}),))
-
-
-def test_remote_version_mismatch_cannot_verify_pruned_result(tmp_path, monkeypatch):
-    root, options = fixture(tmp_path, monkeypatch)
-    options = _with_receipt_version(options, 'unexpected-version')
-    with pytest.raises(ValueError, match='unexpected-version.*pruned result'):
-        ImportLifecycleEngine().prepare([root], options)
-
-
-def test_remote_version_mismatch_keeps_full_result(tmp_path, monkeypatch, caplog):
-    root, options = fixture(tmp_path, monkeypatch)
-    # Replace the remote result by a full one: the returned pixels differ.
-    shutil.rmtree(root)
-    _make_image(root, labels=('cells',))
-    report = normalize(root, options.operations[0].canonical_inputs,
-                       identity_provider=IdentityProvider(_identity('ISCC:ICHANGED')),
-                       image='helper:0.1.0')
-    assert report.result == 'kept-full'
-    options = _with_receipt_version(options, 'unexpected-version')
+def test_remote_version_mismatch_with_compatible_report_is_accepted(tmp_path, monkeypatch, caplog):
+    root, options = fixture(tmp_path, monkeypatch, helper_version='0.0.1')
     plan = ImportLifecycleEngine().prepare([root], options)
     assert [(item.path, item.role) for item in plan.items] == [
         (root, 'primary'), (root / 'labels/cells', 'image-label')]
     provenance = json.loads((root / '.biomero-import-storage.json').read_text())
+    assert provenance['storage'] == 'shallow-zarr'
+    assert provenance['tool_version'] == '0.0.1'
+    assert '0.0.1' in caplog.text and shallower_version in caplog.text
+
+
+def test_remote_version_mismatch_keeps_full_result(tmp_path, monkeypatch, caplog):
+    root, options = fixture(tmp_path, monkeypatch, helper_version='0.0.1',
+                            provider=IdentityProvider(_identity('ISCC:ICHANGED')))
+    plan = ImportLifecycleEngine().prepare([root], options)
+    assert [(item.path, item.role) for item in plan.items][0] == (root, 'primary')
+    provenance = json.loads((root / '.biomero-import-storage.json').read_text())
     assert provenance['storage'] == 'full-zarr'
-    assert provenance['reason'] == 'remote-shallower-version-mismatch'
-    assert 'unexpected-version' in caplog.text and shallower_version in caplog.text
+    assert '0.0.1' in caplog.text and shallower_version in caplog.text
+
+
+def test_remote_version_mismatch_with_incompatible_report_fails_clearly(tmp_path, monkeypatch):
+    root, options = fixture(tmp_path, monkeypatch)
+    operation = options.operations[0]
+    receipt = operation.remote_receipts[0].model_copy(update={'tool_version': '0.0.1'})
+    options = ImportOptionsEnvelope(operations=(
+        operation.model_copy(update={'remote_receipts': (receipt,)}),))
+    with pytest.raises(ValueError, match=rf'0\.0\.1.*not compatible with installed {shallower_version}'):
+        ImportLifecycleEngine().prepare([root], options)
 
 
 def test_remote_receipt_respects_admin_opt_out(tmp_path, monkeypatch):
