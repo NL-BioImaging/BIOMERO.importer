@@ -245,6 +245,16 @@ def _full_result_items(
     return tuple(items)
 
 
+def _write_full_storage(
+    root: Path, operation: ShallowZarrImportOperation, reason: str
+) -> None:
+    write_json(root / '.biomero-import-storage.json', {
+        'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
+        'storage': 'full-zarr', 'location': 'importer',
+        'tool_version': shallower_version, 'reason': reason,
+    })
+
+
 class ImportLifecycleEngine:
     """Execute optional native operations without knowing register.py."""
 
@@ -325,18 +335,33 @@ class ImportLifecycleEngine:
                     if receipt.artifact_path in used_receipts:
                         raise ValueError("Remote shallow receipt matches multiple stores")
                     used_receipts.add(receipt.artifact_path)
-                    expected_image = os.getenv(
-                        "BIOMERO_REMOTE_SHALLOWER_IMAGE",
-                        "cellularimagingcf/biomero-shallower:0.1.0",
-                    )
-                    expected_version = os.getenv("BIOMERO_REMOTE_SHALLOWER_VERSION", "0.1.0")
-                    if receipt.image != expected_image or receipt.tool_version != expected_version:
-                        raise ValueError("Remote shallow helper differs from administrator configuration")
+                    if receipt.tool_version != shallower_version:
+                        # Remote pruning cannot be undone, so only a full
+                        # result can be kept; the receipt is not trusted.
+                        attempt = ShallowOperationReport.from_dict(json.loads(
+                            (root / SHALLOW_OPERATION_REPORT).read_text(encoding="utf-8")))
+                        if attempt.result == "normalized":
+                            raise ValueError(
+                                "Remote shallow result was produced by "
+                                f"biomero-shallower {receipt.tool_version} "
+                                f"(image {receipt.image}) but this importer has "
+                                f"{shallower_version}; the pruned result cannot "
+                                "be verified")
+                        self.logger.warning(
+                            "Remote shallower version %s (image %s) differs from "
+                            "installed version %s; importing the full result of %s",
+                            receipt.tool_version, receipt.image,
+                            shallower_version, root)
+                        remove_transfer_input_marker(root)
+                        _write_full_storage(
+                            root, operation, "remote-shallower-version-mismatch")
+                        prepared.extend(_full_result_items(root, operation, item.registration))
+                        continue
                     actual = hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
                     if actual != receipt.report_sha256:
                         raise ValueError("Remote shallow report checksum mismatch")
                     report = validate_report(root, operation.canonical_inputs,
-                                             image=expected_image, tool_version=expected_version,
+                                             image=receipt.image, tool_version=shallower_version,
                                              artifact=PurePosixPath(receipt.artifact_path).name)
                     if (report.result not in {"normalized", "kept-full"} or report.task_id != receipt.task_id
                             or report.slurm_job_id != receipt.slurm_job_id):
@@ -398,11 +423,7 @@ class ImportLifecycleEngine:
                         "Consumed temporary Zarr input marker for %s", root
                     )
                 if not decision.eligible:
-                    write_json(root / '.biomero-import-storage.json', {
-                        'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
-                        'storage': 'full-zarr', 'location': 'importer',
-                        'tool_version': shallower_version, 'reason': decision.reason,
-                    })
+                    _write_full_storage(root, operation, decision.reason)
                     prepared.extend(_full_result_items(
                         root, operation, item.registration
                     ))

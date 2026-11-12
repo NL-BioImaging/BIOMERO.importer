@@ -1,4 +1,6 @@
 import hashlib
+import json
+import shutil
 from unittest.mock import patch
 
 import pytest
@@ -17,8 +19,6 @@ def fixture(tmp_path, monkeypatch):
     manifest = _manifest(_input(0))
     monkeypatch.setenv('BIOMERO_SHALLOW_ZARR', 'true')
     monkeypatch.setenv('BIOMERO_REMOTE_SHALLOW_ZARR', 'true')
-    monkeypatch.setenv('BIOMERO_REMOTE_SHALLOWER_IMAGE', 'helper:0.1.0')
-    monkeypatch.setenv('BIOMERO_REMOTE_SHALLOWER_VERSION', shallower_version)
     monkeypatch.setenv('SLURM_JOB_ID', '123')
     task_id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
     normalize(root, manifest, identity_provider=IdentityProvider(_identity()),
@@ -51,11 +51,37 @@ def test_remote_tamper_is_rejected(tmp_path, monkeypatch):
         ImportLifecycleEngine().prepare([root], options)
 
 
-def test_remote_version_mismatch_is_rejected(tmp_path, monkeypatch):
+def _with_receipt_version(options, version):
+    operation = options.operations[0]
+    receipt = operation.remote_receipts[0].model_copy(update={'tool_version': version})
+    return ImportOptionsEnvelope(operations=(
+        operation.model_copy(update={'remote_receipts': (receipt,)}),))
+
+
+def test_remote_version_mismatch_cannot_verify_pruned_result(tmp_path, monkeypatch):
     root, options = fixture(tmp_path, monkeypatch)
-    monkeypatch.setenv('BIOMERO_REMOTE_SHALLOWER_VERSION', 'unexpected-version')
-    with pytest.raises(ValueError, match='administrator configuration'):
+    options = _with_receipt_version(options, 'unexpected-version')
+    with pytest.raises(ValueError, match='unexpected-version.*pruned result'):
         ImportLifecycleEngine().prepare([root], options)
+
+
+def test_remote_version_mismatch_keeps_full_result(tmp_path, monkeypatch, caplog):
+    root, options = fixture(tmp_path, monkeypatch)
+    # Replace the remote result by a full one: the returned pixels differ.
+    shutil.rmtree(root)
+    _make_image(root, labels=('cells',))
+    report = normalize(root, options.operations[0].canonical_inputs,
+                       identity_provider=IdentityProvider(_identity('ISCC:ICHANGED')),
+                       image='helper:0.1.0')
+    assert report.result == 'kept-full'
+    options = _with_receipt_version(options, 'unexpected-version')
+    plan = ImportLifecycleEngine().prepare([root], options)
+    assert [(item.path, item.role) for item in plan.items] == [
+        (root, 'primary'), (root / 'labels/cells', 'image-label')]
+    provenance = json.loads((root / '.biomero-import-storage.json').read_text())
+    assert provenance['storage'] == 'full-zarr'
+    assert provenance['reason'] == 'remote-shallower-version-mismatch'
+    assert 'unexpected-version' in caplog.text and shallower_version in caplog.text
 
 
 def test_remote_receipt_respects_admin_opt_out(tmp_path, monkeypatch):
@@ -119,8 +145,6 @@ def test_kept_full_receipt_refreshes_source_cache_without_repeating_comparison(
             return _identity('ISCC:ISOURCE' if Path(path) == original else 'ISCC:ICHANGED')
 
     monkeypatch.setenv('BIOMERO_SHALLOW_ZARR', 'true')
-    monkeypatch.setenv('BIOMERO_REMOTE_SHALLOWER_IMAGE', 'helper:0.1.0')
-    monkeypatch.setenv('BIOMERO_REMOTE_SHALLOWER_VERSION', shallower_version)
     monkeypatch.setenv('SLURM_JOB_ID', '123')
     task_id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
     report = normalize(root, manifest, identity_provider=DifferentResult(),
