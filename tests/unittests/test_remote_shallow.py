@@ -43,6 +43,50 @@ def test_remote_result_bypasses_identity_and_normalization(tmp_path, monkeypatch
     ]
 
 
+def test_remote_receipt_decision_is_logged(tmp_path, monkeypatch, caplog):
+    root, options = fixture(tmp_path, monkeypatch)
+    with caplog.at_level('DEBUG', logger='biomero_importer.utils.lifecycle'):
+        ImportLifecycleEngine().prepare([root], options)
+    assert 'Validating remote shallow receipt' in caplog.text
+    assert 'Accepted remote shallow result' in caplog.text
+
+
+def test_remote_kept_full_is_logged(tmp_path, monkeypatch, caplog):
+    root, options = fixture(tmp_path, monkeypatch)
+    manifest = options.operations[0].canonical_inputs
+    # A full result reported by the helper: the returned pixels differ.
+    import shutil
+    shutil.rmtree(root)
+    _make_image(root, labels=('cells',))
+    report = normalize(root, manifest, identity_provider=IdentityProvider(_identity('ISCC:ICHANGED')),
+                       image='helper:0.1.0', task_id='cccccccc-cccc-cccc-cccc-cccccccccccc')
+    assert report.result == 'kept-full'
+    receipt = options.operations[0].remote_receipts[0].model_copy(update={
+        'report_sha256': hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()})
+    options = ImportOptionsEnvelope(operations=(ShallowZarrImportOperation(
+        canonicalInputs=manifest, remoteReceipts=(receipt,)),))
+    with caplog.at_level('INFO', logger='biomero_importer.utils.lifecycle'):
+        ImportLifecycleEngine().prepare([root], options)
+    assert 'Remote shallowing kept the full result' in caplog.text
+
+
+def test_remote_result_without_receipt_is_evaluated_locally_with_warning(tmp_path, monkeypatch, caplog):
+    root, options = fixture(tmp_path, monkeypatch)
+    manifest = options.operations[0].canonical_inputs
+    import shutil
+    shutil.rmtree(root)
+    _make_image(root, labels=('cells',))
+    normalize(root, manifest, identity_provider=IdentityProvider(_identity('ISCC:ICHANGED')),
+              image='helper:0.1.0')
+    options = ImportOptionsEnvelope(operations=(ShallowZarrImportOperation(
+        canonicalInputs=manifest),))
+    with patch('biomero_importer.utils.lifecycle.evaluate_returned_zarr',
+               side_effect=AssertionError('evaluated')),          pytest.raises(AssertionError, match='evaluated'):
+        ImportLifecycleEngine().prepare([root], options)
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
+    assert any('no receipt; evaluating locally' in m for m in warnings)
+
+
 def test_remote_tamper_is_rejected(tmp_path, monkeypatch):
     root, options = fixture(tmp_path, monkeypatch)
     report = root / SHALLOW_OPERATION_REPORT

@@ -268,6 +268,20 @@ def _write_full_storage(
     })
 
 
+# keep-full reasons that signal a failure rather than an expected comparison.
+_KEEP_FULL_FAILURE_PREFIXES = (
+    "normalization-failed", "unsupported-", "identity-unavailable",
+    "label-identity-unavailable", "invalid-", "untrusted-", "ambiguous-",
+    "no-canonical-input-snapshot",
+)
+
+
+def _keep_full_level(reason: str) -> int:
+    """WARNING for genuine failures, INFO for expected keep-full outcomes."""
+    return (logging.WARNING if reason.startswith(_KEEP_FULL_FAILURE_PREFIXES)
+            else logging.INFO)
+
+
 class ImportLifecycleEngine:
     """Execute optional native operations without knowing register.py."""
 
@@ -323,12 +337,18 @@ class ImportLifecycleEngine:
             "BIOMERO_REMOTE_SHALLOW_ZARR", "true"
         ).lower() != "true":
             raise ValueError("Remote shallow receipt consumption is disabled")
+        self.logger.debug(
+            f"Preparing shallow Zarr import: {len(current)} item(s), "
+            f"{len(operation.remote_receipts)} remote receipt(s), "
+            f"{workers} identity worker(s)"
+        )
         used_receipts = set()
         prepared = []
         decisions = []
         for item in current:
             root = item.path
             if not _is_zarr(root):
+                self.logger.debug(f"Not a Zarr store, skipping shallowing: {root}")
                 prepared.append(item)
                 continue
             with _recover_result_store(root):
@@ -343,15 +363,26 @@ class ImportLifecycleEngine:
                                 if receipt.report_sha256 == checksum]
                 if len(receipts) > 1:
                     raise ValueError("Ambiguous remote shallow receipt")
+                self.logger.debug(
+                    f"Matched {len(receipts)} remote receipt(s) for {root} by "
+                    "artifact path or report checksum")
                 if receipts:
                     receipt = receipts[0]
                     if receipt.artifact_path in used_receipts:
                         raise ValueError("Remote shallow receipt matches multiple stores")
                     used_receipts.add(receipt.artifact_path)
+                    self.logger.info(
+                        f"Validating remote shallow receipt for {root} (image "
+                        f"{receipt.image}, version {receipt.tool_version}, "
+                        f"task {receipt.task_id})"
+                    )
                     mismatch = receipt.tool_version != shallower_version
                     actual = hashlib.sha256((root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
                     if actual != receipt.report_sha256:
                         raise ValueError("Remote shallow report checksum mismatch")
+                    self.logger.debug(
+                        f"Remote shallow report checksum matches receipt for {root}"
+                    )
                     try:
                         report = validate_report(root, operation.canonical_inputs,
                                                  image=receipt.image, tool_version=receipt.tool_version,
@@ -376,6 +407,11 @@ class ImportLifecycleEngine:
                     if (report.result not in {"normalized", "kept-full"} or report.task_id != receipt.task_id
                             or report.slurm_job_id != receipt.slurm_job_id):
                         raise ValueError("Remote shallow task provenance mismatch")
+                    self.logger.debug(
+                        f"Remote shallow report for {root}: result "
+                        f"{report.result}, reason {report.reason}, task and "
+                        "Slurm job match the receipt"
+                    )
                     if report.refreshed_inputs is not None:
                         cache_refreshed_inputs(operation.canonical_inputs,
                             report.refreshed_inputs.inputs, load_managed_storage_roots())
@@ -388,19 +424,37 @@ class ImportLifecycleEngine:
                         'report_sha256': receipt.report_sha256,
                     })
                     if report.result == "kept-full":
+                        self.logger.log(
+                            _keep_full_level(report.reason),
+                            f"Remote shallowing kept the full result for {root}: "
+                            f"{report.reason}"
+                        )
                         remove_transfer_input_marker(root)
                         prepared.extend(_full_result_items(root, operation, item.registration))
                         continue
+                    self.logger.info(
+                        f"Accepted remote shallow result for {root} "
+                        f"({report.reason})"
+                    )
                 elif (root / SHALLOW_OPERATION_REPORT).exists():
                     attempt = ShallowOperationReport.from_dict(json.loads(
                         (root / SHALLOW_OPERATION_REPORT).read_text(encoding="utf-8")))
                     if attempt.result == "normalized":
                         raise ValueError("Remote shallow result is missing its trusted receipt")
+                    self.logger.warning(
+                        f"Remote shallowing left {root} with result "
+                        f"{attempt.result} ({attempt.reason}) and no receipt; "
+                        "evaluating locally"
+                    )
                     # Preserve fallback provenance without marking the later local
                     # normalization as a remotely completed operation on retry.
                     (root / SHALLOW_OPERATION_REPORT).replace(root / ".biomero-remote-attempt.json")
+                else:
+                    self.logger.debug(
+                        f"No remote receipt or report for {root}; using local "
+                        "shallowing")
                 if existing is not None:
-                    self.logger.info(
+                    self.logger.debug(
                         "Reusing existing shallow Zarr manifest for %s", root
                     )
                     prepared.extend(_items_for_shallow_manifest(
@@ -422,11 +476,11 @@ class ImportLifecycleEngine:
                 if decision.refreshed_inputs:
                     cache_refreshed_inputs(operation.canonical_inputs,
                         decision.refreshed_inputs, load_managed_storage_roots())
-                self.logger.info(
-                    "Returned Zarr decision for %s: %s (%s)",
-                    root,
-                    decision.outcome,
-                    decision.reason,
+                self.logger.log(
+                    _keep_full_level(decision.reason)
+                    if decision.outcome == "keep-full" else logging.INFO,
+                    f"Returned Zarr decision for {root}: {decision.outcome} "
+                    f"({decision.reason})"
                 )
                 if remove_transfer_input_marker(root):
                     self.logger.info(
@@ -438,6 +492,10 @@ class ImportLifecycleEngine:
                         root, operation, item.registration
                     ))
                     continue
+                self.logger.info(
+                    f"Shallowing returned Zarr {root} locally "
+                    f"(basis: {decision.reason})"
+                )
                 try:
                     manifest = normalize_returned_zarr(
                         decision,
