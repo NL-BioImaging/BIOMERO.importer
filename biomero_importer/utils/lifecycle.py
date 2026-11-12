@@ -414,29 +414,36 @@ class ImportLifecycleEngine:
                     ))
                     continue
                 try:
-                    normalized = normalize_returned_zarr(
+                    manifest = normalize_returned_zarr(
                         decision,
                         operation.canonical_inputs.workflow_id,
-                    )
+                    ).manifest
                 except (PixelIdentityError, OSError) as exc:
                     # Data or filesystem failures roll back inside
                     # normalize_returned_zarr; keep the full result as the
                     # remote helper does. Anything else is a bug: propagate.
-                    self.logger.warning(
-                        "Shallowing %s failed (%s); importing the full result",
-                        root, exc,
-                    )
                     # Idempotent; fails loudly if the rollback is incomplete.
                     recover(root)
                     if (root / SHALLOW_COLLECTION_MANIFEST).exists():
-                        raise  # committed: the full result no longer exists
-                    _write_full_storage(
-                        root, operation, f"normalization-failed: {exc}"
-                    )
-                    prepared.extend(_full_result_items(
-                        root, operation, item.registration
-                    ))
-                    continue
+                        # Failed after the commit (e.g. cleanup): the store is a
+                        # valid shallow result if its manifest loads.
+                        manifest = _load_shallow_manifest(root)
+                        self.logger.warning(
+                            "Shallowing %s failed after commit (%s); "
+                            "using the committed shallow result", root, exc,
+                        )
+                    else:
+                        self.logger.warning(
+                            "Shallowing %s failed (%s); importing the full result",
+                            root, exc,
+                        )
+                        _write_full_storage(
+                            root, operation, f"normalization-failed: {exc}"
+                        )
+                        prepared.extend(_full_result_items(
+                            root, operation, item.registration
+                        ))
+                        continue
                 write_json(root / '.biomero-import-storage.json', {
                     'schema': 1, 'workflow_id': str(operation.canonical_inputs.workflow_id),
                     'storage': 'shallow-zarr', 'location': 'importer',
@@ -446,10 +453,10 @@ class ImportLifecycleEngine:
                 self.logger.info(
                     "Stored shallow Zarr %s with %s image node(s)",
                     root,
-                    len(normalized.manifest.collection.images),
+                    len(manifest.collection.images),
                 )
                 prepared.extend(_items_for_shallow_manifest(
-                    root, normalized.manifest, operation
+                    root, manifest, operation
                 ))
         if used_receipts != {receipt.artifact_path for receipt in operation.remote_receipts}:
             raise ValueError("Remote shallow receipt has no matching import file")

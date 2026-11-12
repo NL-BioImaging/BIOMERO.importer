@@ -426,6 +426,34 @@ def test_pruning_failure_keeps_and_imports_full_result(tmp_path, monkeypatch, ca
     assert recovered.call_count >= 2  # store recovery plus post-failure check
 
 
+def test_failure_after_commit_uses_committed_shallow_result(tmp_path, monkeypatch, caplog):
+    root = _zarr(tmp_path)
+    manifest = _manifest()
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="eligible", reason="matched"),
+    )
+
+    def commit_then_fail(*args, **kwargs):
+        (root / ".biomero-shallow.json").write_text("{}", encoding="utf-8")
+        raise OSError(errno.EIO, "cleanup failed")
+
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr", commit_then_fail)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle._load_shallow_manifest",
+        lambda path: manifest if (path / ".biomero-shallow.json").exists() else None)
+
+    plan = ImportLifecycleEngine().prepare([root], _options())
+
+    assert (root, "primary") in [(item.path, item.role) for item in plan.items]
+    provenance = json.loads((root / ".biomero-import-storage.json").read_text())
+    assert provenance["storage"] == "shallow-zarr"
+    assert "committed shallow result" in caplog.text
+
+
 def test_programming_error_during_pruning_still_fails(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
