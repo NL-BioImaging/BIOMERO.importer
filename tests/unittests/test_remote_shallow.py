@@ -187,7 +187,7 @@ def test_full_fallback_can_normalize_locally_and_retry(tmp_path, monkeypatch):
     _make_image(root, labels=('cells',))
     manifest = _manifest(_input(0))
     monkeypatch.setenv('BIOMERO_SHALLOW_ZARR', 'true')
-    with patch('biomero_shallower.result_zarr._identity_for_node',
+    with patch('biomero_shallower.evaluation._identity_for_node',
                side_effect=PixelIdentityError('unavailable')):
         report = normalize(root, manifest)
     assert report.result == 'kept-full'

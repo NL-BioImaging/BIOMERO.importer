@@ -29,15 +29,25 @@ from biomero_schema.zarr import (
     ZarrImportOptions,
 )
 from biomero_shallower import __version__ as shallower_version
+from biomero_shallower.discovery import discover_ngff_nodes
+from biomero_shallower.evaluation import (
+    OUTCOME_KEEP_FULL,
+    REASON_NORMALIZATION_FAILED,
+    ReturnedZarrDecision,
+    evaluate_returned_zarr,
+    is_failure_reason,
+    remove_transfer_input_marker,
+)
+from biomero_shallower.normalization import normalize_returned_zarr
 from biomero_shallower.operations import (
-    NORMALIZATION_FAILED,
     RESULT_KEPT_FULL,
     RESULT_NORMALIZED,
     locked,
     validate_report,
 )
+from biomero_shallower.registration import load_managed_storage_roots
 from biomero_shallower.transaction import (
-    prune_committed,
+    prune_was_committed,
     recover,
     rollback_folders,
     write_json,
@@ -45,16 +55,6 @@ from biomero_shallower.transaction import (
 
 from .canonical_store import cache_refreshed_inputs
 from .pixel_identity import PixelIdentityError
-from .result_zarr import (
-    OUTCOME_KEEP_FULL,
-    ReturnedZarrDecision,
-    discover_ngff_nodes,
-    is_failure_reason,
-    evaluate_returned_zarr,
-    normalize_returned_zarr,
-    remove_transfer_input_marker,
-    load_managed_storage_roots,
-)
 from .shallow_settings import (
     DEFAULT_REMOTE_SHALLOW_ZARR,
     DEFAULT_SHALLOW_WORKERS,
@@ -441,7 +441,7 @@ def _prune_committed(root: Path, logger: logging.Logger) -> bool:
     prune was interrupted before the commit point and must be rolled back.
     """
     try:
-        return prune_committed(root)
+        return prune_was_committed(root)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.warning(
             f"Cannot read the prune journal of {root} ({exc}); treating the "
@@ -919,7 +919,7 @@ class ImportLifecycleEngine:
             f"Shallowing {root} failed ({failure}); rolled back and "
             "importing the full result", exc_info=True,
         )
-        _write_full_storage(root, operation, f"{NORMALIZATION_FAILED}: {failure}")
+        _write_full_storage(root, operation, f"{REASON_NORMALIZATION_FAILED}: {failure}")
         return _full_result_items(root, operation, item.registration)
 
 

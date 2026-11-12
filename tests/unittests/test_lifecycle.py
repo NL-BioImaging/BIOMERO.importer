@@ -34,7 +34,7 @@ from biomero_importer.utils.result_zarr import (
     ReturnedZarrDecision,
 )
 from biomero_shallower.operations import locked
-from biomero_shallower.transaction import begin
+from biomero_shallower.transaction import begin, commit, rollback_path
 
 
 WORKFLOW_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -495,7 +495,7 @@ def _real_pruning_setup(tmp_path, monkeypatch, replace):
                 identity_provider=IdentityProvider(_result_identity())))
     monkeypatch.setattr(
         "biomero_importer.utils.lifecycle.normalize_returned_zarr",
-        partial(normalize_returned_zarr, replace=replace))
+        partial(normalize_returned_zarr, move=replace))
     options = ImportOptionsEnvelope(operations=(ShallowZarrImportOperation(
         canonicalInputs=manifest),))
     return root, options
@@ -552,20 +552,30 @@ def test_corrupt_metadata_during_pruning_keeps_full_result(tmp_path, monkeypatch
 
 
 def _prune_state(tmp_path, journal):
-    """A store with a shallow manifest and, optionally, a prune journal."""
+    """A store with a shallow manifest and, optionally, a prune journal.
+
+    ``journal`` is None (no journal), "committed", "uncommitted" or raw text
+    written as an unreadable journal.
+    """
     root = _zarr(tmp_path)
     (root / ".biomero-shallow.json").write_text("{}", encoding="utf-8")
-    if journal is not None:
-        rollback = tmp_path / ".result.zarr.biomero-prune-abc"
-        rollback.mkdir()
+    if journal is None:
+        return root
+    rollback = rollback_path(root, "abc")
+    rollback.mkdir()
+    if journal in ("committed", "uncommitted"):
+        written = begin(root, rollback, [], {})
+        if journal == "committed":
+            commit(written)
+    else:
         (rollback / "journal.json").write_text(journal, encoding="utf-8")
     return root
 
 
 @pytest.mark.parametrize("journal, committed", [
     (None, True),
-    ('{"committed": true}', True),
-    ('{"committed": false}', False),
+    ("committed", True),
+    ("uncommitted", False),
     ("not json", False),
     ("[]", False),
     ("null", False),

@@ -661,7 +661,7 @@ def test_normalization_restores_full_store_when_array_move_fails(tmp_path):
         normalize_returned_zarr(
             decision,
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            replace=fail_second_replace,
+            move=fail_second_replace,
         )
     except OSError as exc:
         assert "simulated commit failure" in str(exc)
@@ -691,7 +691,7 @@ def test_normalization_moves_arrays_without_copying_retained_tree(
         raise AssertionError("normalization must not copy the retained tree")
 
     monkeypatch.setattr(
-        "biomero_importer.utils.result_zarr.shutil.copytree",
+        "shutil.copytree",
         fail_copytree,
     )
 
