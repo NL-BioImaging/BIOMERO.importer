@@ -16,7 +16,7 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 """Transactional storage primitives for canonical BIOMERO Zarrs."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import errno
 import json
 import logging
@@ -40,6 +40,7 @@ from biomero_schema.zarr import (
     CanonicalPlateSource,
     CanonicalZarrSource,
 )
+from biomero_shallower.operations import locked
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,11 @@ CANONICAL_METADATA_DIRECTORY = ".biomero"
 CANONICAL_MARKER_SUFFIX = ".canonical.json"
 ENV_PROCESSED_DATA_FOLDER = "PROCESSED_DATA_FOLDER"
 DEFAULT_PROCESSED_DATA_FOLDER = ".processed"
+# Importers before the kernel lock created ``<name>.ome.zarr.lock`` with
+# O_EXCL and a PID; a crash left it behind. It is ignored now (see
+# ``creation_lock``). The kernel lock file is named by the shallower's
+# ``locked`` as ``.<name>.ome.zarr.biomero-lock``.
+LEGACY_CREATION_LOCK_SUFFIX = ".lock"
 
 
 def read_processed_data_folder(
@@ -155,6 +161,26 @@ class CanonicalCreationLocked(RuntimeError):
     """Another process is creating the same canonical Zarr."""
 
 
+class CanonicalCreationLockUnavailable(RuntimeError):
+    """The lock cannot be taken at all (read-only mount, no lock support).
+
+    Not the same as ``CanonicalCreationLocked``: nobody else holds the lock,
+    so waiting or retrying will not help.
+    """
+
+
+# msvcrt.locking reports a lock held by another process as EACCES (a
+# PermissionError) or EDEADLK; flock reports it as BlockingIOError.
+_WINDOWS_LOCK_BUSY_ERRNOS = (errno.EACCES, errno.EDEADLK)
+
+
+def _is_lock_busy(error: OSError) -> bool:
+    """Return whether a failed lock attempt means another process holds it."""
+    if isinstance(error, BlockingIOError):
+        return True
+    return os.name == "nt" and error.errno in _WINDOWS_LOCK_BUSY_ERRNOS
+
+
 class CanonicalStore:
     """Resolves and commits canonical Zarrs beneath one managed storage root."""
 
@@ -217,27 +243,75 @@ class CanonicalStore:
     def creation_lock(
         self, source: CanonicalSourceLike
     ) -> Iterator[Path]:
+        """Hold the creation lock of one canonical Zarr.
+
+        The lock is a kernel file lock (``flock``, or ``msvcrt`` on Windows)
+        taken through the shallower's ``locked``, so the operating system
+        releases it when the holder exits, also after a crash or kill. The lock
+        file that stays behind carries no state and never blocks a later
+        creation. The lock is taken where the canonical Zarr is created, which
+        is the OMERO script worker container (biomero-scripts call
+        ``commit``), not the importer container. A busy lock is not waited
+        for: the holder is creating the same Zarr, so the caller fails fast
+        and can adopt its result later.
+
+        Args:
+            source (CanonicalSourceLike): Canonical source to be created.
+
+        Yields:
+            Path: The canonical destination to create.
+
+        Raises:
+            CanonicalCreationLocked: If another process holds the lock.
+            CanonicalCreationLockUnavailable: If the lock cannot be taken for
+                another reason (permissions, unsupported file locks).
+        """
         destination = self.destination_for(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = destination.with_name(destination.name + ".lock")
+        self._ignore_legacy_creation_lock(destination)
+        # ExitStack wraps the shallower's context manager so that taking the
+        # lock can fail on its own, apart from the caller's body, and so that
+        # "released" is logged after the lock is really released.
+        lock_stack = ExitStack()
+        logger.debug(f"Acquiring canonical creation lock for {destination}")
         try:
-            descriptor = os.open(
-                lock_path,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            )
-        except FileExistsError as exc:
-            raise CanonicalCreationLocked(
-                f"Canonical creation is already locked: {destination}"
+            lock_stack.enter_context(locked(destination))
+        except OSError as exc:
+            if _is_lock_busy(exc):
+                logger.debug(
+                    f"Canonical creation lock for {destination} is busy")
+                raise CanonicalCreationLocked(
+                    f"Canonical creation is already locked by another "
+                    f"process, not waiting: {destination}"
+                ) from exc
+            raise CanonicalCreationLockUnavailable(
+                f"Cannot take the canonical creation lock for "
+                f"{destination} (errno {exc.errno}: {exc}); the storage "
+                f"may be read-only or lack file lock support"
             ) from exc
+        logger.info(f"Acquired canonical creation lock for {destination}")
         try:
-            os.write(descriptor, str(os.getpid()).encode("ascii"))
-            os.close(descriptor)
-            descriptor = None
             yield destination
         finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            lock_path.unlink(missing_ok=True)
+            lock_stack.close()
+            logger.debug(
+                f"Released canonical creation lock for {destination}")
+
+    @staticmethod
+    def _ignore_legacy_creation_lock(destination: Path) -> None:
+        """Log a PID lock file of an older importer; it no longer blocks.
+
+        The old lock was the existence of the file itself, so a leftover from
+        a crash blocked creation until someone removed it. Nothing reads it
+        now. It is left in place (BIOMERO's own folder, harmless) so that an
+        older importer still running during a rolling upgrade keeps its lock.
+        """
+        legacy_lock = destination.with_name(
+            destination.name + LEGACY_CREATION_LOCK_SUFFIX)
+        if legacy_lock.exists():
+            logger.info(
+                f"Ignoring legacy canonical creation lock {legacy_lock} left "
+                f"by an older importer or a crash; it is safe to delete")
 
     def adopt(self, source: CanonicalSourceLike) -> Optional[Path]:
         """Returns a matching committed canonical, or None when absent."""

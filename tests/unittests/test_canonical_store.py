@@ -1,7 +1,11 @@
 import errno
 import json
 import importlib.util
+import logging
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 from biomero_schema.zarr import (
@@ -798,3 +802,149 @@ def test_invalid_marker_message_names_what_failed(tmp_path, source_record):
 
     with pytest.raises(InvalidCanonicalStore, match="state: .*committed"):
         load_canonical_marker(destination)
+
+
+# A child process takes the creation lock, reports readiness on stdout and
+# then waits for stdin to close, so tests control when it holds the lock.
+LOCK_HOLDER_SCRIPT = """
+import importlib.util, json, sys
+from biomero_schema.zarr import CanonicalZarrSource
+spec = importlib.util.spec_from_file_location("canonical_store", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+store = module.CanonicalStore(sys.argv[2])
+with store.creation_lock(CanonicalZarrSource.from_dict(json.loads(sys.argv[3]))):
+    print("locked", flush=True)
+    sys.stdin.read()
+"""
+
+
+@pytest.fixture
+def lock_holder(tmp_path, source_record):
+    """Start a child process that holds the creation lock of source_record."""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", LOCK_HOLDER_SCRIPT, str(MODULE_PATH),
+         str(tmp_path), json.dumps(source_record)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    assert holder.stdout.readline().strip() == "locked"
+    yield holder
+    holder.kill()
+    holder.wait(timeout=30)
+    holder.stdin.close()
+    holder.stdout.close()
+
+
+def test_creation_lock_is_refused_while_another_process_holds_it(
+        tmp_path, source_record, lock_holder):
+    store = CanonicalStore(tmp_path)
+
+    with pytest.raises(CanonicalCreationLocked) as excinfo:
+        with store.creation_lock(source_record):
+            pytest.fail("lock held by another process was acquired")
+
+    assert "not waiting" in str(excinfo.value)
+
+
+def test_creation_lock_is_free_after_holder_released_it(
+        tmp_path, source_record, lock_holder):
+    lock_holder.stdin.close()  # the child leaves its with-block and exits
+    assert lock_holder.wait(timeout=30) == 0
+
+    with CanonicalStore(tmp_path).creation_lock(source_record) as destination:
+        assert destination.name == "Image-3207.ome.zarr"
+
+
+def test_creation_lock_recovers_after_holder_was_killed(
+        tmp_path, source_record, lock_holder, caplog):
+    """A hard crash leaves the lock file behind but must not block creation."""
+    lock_holder.kill()
+    lock_holder.wait(timeout=30)
+    lock_files = list((tmp_path / "project" / ".processed").glob("*lock"))
+    assert lock_files, "the killed holder should leave its lock file behind"
+
+    with caplog.at_level(logging.INFO, logger=canonical_store.logger.name):
+        with CanonicalStore(tmp_path).creation_lock(source_record):
+            pass
+
+    assert "Acquired canonical creation lock" in caplog.text
+
+
+def test_creation_lock_ignores_legacy_pid_lock_file(
+        tmp_path, source_record, caplog):
+    """The O_EXCL ``<name>.lock`` of older importers must not block."""
+    processed = tmp_path / "project" / ".processed"
+    processed.mkdir(parents=True)
+    legacy_lock = processed / "Image-3207.ome.zarr.lock"
+    legacy_lock.write_text(str(os.getpid()), encoding="ascii")
+
+    with caplog.at_level(logging.INFO, logger=canonical_store.logger.name):
+        with CanonicalStore(tmp_path).creation_lock(source_record):
+            pass
+
+    assert "Ignoring legacy canonical creation lock" in caplog.text
+    assert legacy_lock.exists(), "the old file is left for a still-running old importer"
+
+
+def test_commit_succeeds_with_legacy_lock_file(tmp_path, source_record):
+    processed = tmp_path / "project" / ".processed"
+    processed.mkdir(parents=True)
+    (processed / "Image-3207.ome.zarr.lock").write_text("99999", encoding="ascii")
+    staging = tmp_path / "staging.ome.zarr"
+    staging.mkdir()
+    (staging / "zarr.json").write_text("{}", encoding="utf-8")
+
+    destination = CanonicalStore(tmp_path).commit(staging, source_record)
+
+    assert (destination / CANONICAL_MARKER_NAME).is_file()
+
+
+def test_creation_lock_file_name_is_pinned(tmp_path, source_record):
+    with CanonicalStore(tmp_path).creation_lock(source_record):
+        pass
+
+    lock_file = (tmp_path / "project" / ".processed"
+                 / ".Image-3207.ome.zarr.biomero-lock")
+    assert lock_file.is_file()
+
+
+def test_commit_is_refused_while_another_process_holds_the_lock(
+        tmp_path, source_record, lock_holder):
+    staging = tmp_path / "staging.ome.zarr"
+    make_zarr_v2(staging)
+
+    with pytest.raises(CanonicalCreationLocked):
+        CanonicalStore(tmp_path).commit(staging, source_record)
+
+    assert (staging / ".zgroup").is_file()
+    assert not (staging / CANONICAL_MARKER_NAME).exists()
+    assert not (tmp_path / source_record["relativePath"]).exists()
+
+
+@pytest.mark.parametrize("error", [
+    OSError(errno.ENOLCK, "no locks available"),
+    OSError(errno.ENOSYS, "function not implemented"),
+    OSError(errno.EROFS, "read-only file system"),
+])
+def test_creation_lock_failure_that_is_not_busy_is_not_reported_as_busy(
+        tmp_path, source_record, monkeypatch, error):
+    def fail(destination):
+        raise error
+
+    monkeypatch.setattr(canonical_store, "locked", fail)
+
+    with pytest.raises(canonical_store.CanonicalCreationLockUnavailable,
+                       match=f"errno {error.errno}") as excinfo:
+        with CanonicalStore(tmp_path).creation_lock(source_record):
+            pytest.fail("lock should not be acquired")
+
+    assert not isinstance(excinfo.value, CanonicalCreationLocked)
+
+
+def test_oserror_in_the_body_is_not_taken_for_a_lock_failure(
+        tmp_path, source_record):
+    with pytest.raises(OSError, match="body failed") as excinfo:
+        with CanonicalStore(tmp_path).creation_lock(source_record):
+            raise OSError(errno.EIO, "body failed")
+
+    assert not isinstance(excinfo.value, RuntimeError)

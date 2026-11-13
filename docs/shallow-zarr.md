@@ -185,6 +185,25 @@ indexed again; release the importer and biomero-scripts changes together.
 Back up the `.processed` folders together with the data they belong to; the
 sidecars live in their `.biomero` subfolders.
 
+### Canonical creation lock
+
+Creating a canonical Zarr takes a kernel file lock on
+`<canonical parent>/.processed/.<name>.ome.zarr.biomero-lock` (the same
+`locked` helper the shallower uses, `flock` on Linux). The operating system
+releases it when the process ends, so a crash or a killed container never
+leaves a lock that blocks later creation. The lock file stays behind empty and
+is safe to delete. The lock is taken where the canonical Zarr is created: in
+the OMERO script worker container (biomero-scripts call `commit`), so the
+worker needs the same shared mount. A second process that finds the lock busy
+does not wait: it fails with `CanonicalCreationLocked`. If the lock cannot be
+taken at all (read-only mount, or a mount without file lock support such as NFS
+without lockd or SMB with `nobrl`) it fails with
+`CanonicalCreationLockUnavailable`, with the errno in the message. Older
+importers used a PID file `<name>.ome.zarr.lock`; it is ignored (logged at
+INFO) and can be deleted. During an upgrade an old and a new version do not
+exclude each other. That is safe: the promotion is an atomic `os.replace`, so
+the loser fails cleanly and the import falls back to a normal export.
+
 ## Interrupted imports and recovery
 
 Recovery is automatic within an explicitly requested shallow lifecycle operation
