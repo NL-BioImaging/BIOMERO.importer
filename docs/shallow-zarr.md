@@ -140,7 +140,10 @@ another pixel copy.
 
 The marker format (`markerSchema`, `state`, `source`) and the name
 `.biomero-canonical.json` are defined by the `CanonicalMarker` model and constants in
-biomero-schema; the importer reads and writes the marker only through them.
+biomero-schema; the importer reads and writes the marker only through them. A
+marker with unknown top-level keys, a different `markerSchema`, a `state` other
+than `committed` or an invalid `source` is rejected as invalid (the store is
+then treated as having no usable marker).
 
 For example, indexing `/data/groupA/project/cells.ome.zarr` in place writes
 `/data/groupA/project/.processed/.biomero/cells.ome.zarr.canonical.json`. This

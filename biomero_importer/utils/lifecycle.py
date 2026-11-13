@@ -186,6 +186,7 @@ VERSION_MISMATCH_HINT = (
     "or rerun the workflow with matching versions"
 )
 
+
 def write_import_storage_record(
     root: Path, record: ImportStorageRecordUnion
 ) -> None:
@@ -293,7 +294,7 @@ def _recover_result_store(root: Path) -> Iterator[None]:
             if exc.errno not in (errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP):
                 raise
             _require_no_pending_prune(root)
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 f"Filesystem locking is unsupported for {root}; using legacy "
                 "import preparation without recovery or concurrency protection")
             yield

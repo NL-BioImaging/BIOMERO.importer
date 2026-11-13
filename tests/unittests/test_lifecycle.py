@@ -58,6 +58,7 @@ from biomero_importer.utils.result_zarr import (
     NormalizedShallowResult,
     ReturnedZarrDecision,
 )
+from biomero_shallower import __version__ as shallower_version
 from biomero_shallower.operations import locked
 from biomero_shallower.transaction import begin, commit, rollback_path
 
@@ -437,10 +438,14 @@ def test_eligible_image_keeps_primary_and_adds_label_registration_view(tmp_path,
     assert plan.decisions == (decision,)
     assert not (root / TRANSFER_INPUT_MARKER).exists()
     provenance = json.loads((root / '.biomero-import-storage.json').read_text())
-    assert provenance['storage'] == 'shallow-zarr'
-    assert provenance['location'] == 'importer'
-    assert provenance['tool_version']
-    assert provenance['workflow_id'] == str(WORKFLOW_ID)
+    assert provenance == {
+        'schema': 1,
+        'workflow_id': str(WORKFLOW_ID),
+        'storage': 'shallow-zarr',
+        'location': 'importer',
+        'tool_version': shallower_version,
+        'decision_basis': 'matched',
+    }
 
 
 @pytest.mark.parametrize("error", [PixelIdentityError("not matching"), OSError(errno.EIO, "io")])
@@ -465,8 +470,15 @@ def test_pruning_failure_keeps_and_imports_full_result(tmp_path, monkeypatch, ca
 
     assert [(item.path, item.role) for item in plan.items] == [(root, "primary")]
     provenance = json.loads((root / ".biomero-import-storage.json").read_text())
-    assert provenance["storage"] == "full-zarr"
     assert provenance["reason"].startswith("normalization-failed")
+    assert provenance == {
+        "schema": 1,
+        "workflow_id": str(WORKFLOW_ID),
+        "storage": "full-zarr",
+        "location": "importer",
+        "tool_version": shallower_version,
+        "reason": provenance["reason"],
+    }
     assert "importing the full result" in caplog.text
     assert recovered.call_count == 2  # store recovery plus post-failure check
 
@@ -881,3 +893,17 @@ def test_import_storage_record_file_keeps_its_persisted_bytes(
     written = (tmp_path / IMPORT_STORAGE_FILENAME).read_text(encoding="utf-8")
     assert written == expected
     assert parse_import_storage_record(json.loads(written)) == record
+
+
+def test_writing_an_import_storage_record_is_logged(tmp_path, caplog):
+    record = ImporterFullImportStorageRecord(
+        schema=1, workflow_id=IMPORT_STORAGE_WORKFLOW, tool_version="1.0",
+        reason="pixels-differ")
+
+    with caplog.at_level("INFO", logger="biomero_importer.utils.lifecycle"):
+        write_import_storage_record(tmp_path, record)
+
+    info = [r for r in caplog.records if r.levelname == "INFO"]
+    assert len(info) == 1
+    assert "Recording full-zarr on importer" in info[0].getMessage()
+    assert IMPORT_STORAGE_FILENAME in info[0].getMessage()

@@ -726,3 +726,75 @@ def test_invalid_marker_is_reported_as_invalid_canonical_store(
         CanonicalStore(tmp_path).adopt(source_record)
     with pytest.raises(InvalidCanonicalStore):
         load_canonical_marker(destination)
+
+
+@pytest.fixture
+def plate_record(source_record):
+    """A Plate source as the plain dict biomero-scripts pass in."""
+    image_source = CanonicalZarrSource.from_dict({
+        **source_record,
+        "relativePath": "project/.processed/Plate-9.ome.zarr",
+        "nodePath": "A/1/0",
+        "sourceObjectType": "Plate",
+        "sourceObjectId": 9,
+        "canonicalPixelVerified": False,
+    })
+    return CanonicalPlateSource(
+        storageRoot="group-5-data",
+        relativePath="project/.processed/Plate-9.ome.zarr",
+        sourceObjectId=9,
+        sourceGeneration=1,
+        interchangeProfile="ngff-0.4-zarr-v2",
+        images=(CanonicalPlateImage(
+            imageNodePath="A/1/0", source=image_source),),
+    ).to_dict()
+
+
+def test_plate_source_as_dict_is_committed_and_adopted_as_a_plate(
+        tmp_path, plate_record):
+    store = CanonicalStore(tmp_path)
+    staging = tmp_path / "staging.ome.zarr"
+    make_zarr_v2(staging)
+
+    committed = store.commit(staging, plate_record)
+
+    assert (committed / CANONICAL_MARKER_NAME).read_text(
+        encoding="utf-8") == old_format_marker_text(plate_record)
+    assert store.adopt(plate_record) == committed
+    assert isinstance(load_canonical_marker(committed), CanonicalPlateSource)
+
+
+def test_plate_sidecar_is_written_byte_for_byte_as_before(
+        tmp_path, plate_record):
+    native = tmp_path / "plate.ome.zarr"
+    make_zarr_v2(native)
+
+    marker_path = write_indexed_canonical_marker(native, plate_record)
+
+    assert marker_path.read_text(
+        encoding="utf-8") == old_format_marker_text(plate_record)
+
+
+def test_marker_with_unknown_top_level_key_is_rejected(
+        tmp_path, source_record):
+    destination = tmp_path / source_record["relativePath"]
+    make_zarr_v2(destination)
+    marker = json.loads(old_format_marker_text(source_record))
+    marker["writtenBy"] = "someone"
+    (destination / CANONICAL_MARKER_NAME).write_text(
+        json.dumps(marker), encoding="utf-8")
+
+    with pytest.raises(InvalidCanonicalStore, match="writtenBy"):
+        load_canonical_marker(destination)
+
+
+def test_invalid_marker_message_names_what_failed(tmp_path, source_record):
+    destination = tmp_path / source_record["relativePath"]
+    make_zarr_v2(destination)
+    marker = json.loads(old_format_marker_text(source_record))
+    marker["state"] = "staging"
+    (destination / CANONICAL_MARKER_NAME).write_text(
+        json.dumps(marker), encoding="utf-8")
+
+    with pytest.raises(InvalidCanonicalStore, match="state: .*committed"):
+        load_canonical_marker(destination)

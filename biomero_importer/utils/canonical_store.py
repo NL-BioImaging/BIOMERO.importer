@@ -127,7 +127,8 @@ def _read_committed_marker(marker_path: Path) -> CanonicalMarker:
 
     Raises:
         InvalidCanonicalStore: If the file is unreadable, is not JSON, or is
-            not a committed marker of a supported schema version.
+            not a committed marker of a supported schema version. Unknown
+            top-level keys are rejected, as are invalid sources.
     """
     try:
         raw_marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -138,8 +139,11 @@ def _read_committed_marker(marker_path: Path) -> CanonicalMarker:
     try:
         return CanonicalMarker.from_dict(raw_marker)
     except ValidationError as exc:
+        first_error = exc.errors()[0]
+        location = ".".join(str(part) for part in first_error["loc"])
         raise InvalidCanonicalStore(
-            f"Canonical marker is not committed: {marker_path}"
+            f"Canonical marker is invalid: {marker_path}: "
+            f"{location}: {first_error['msg']}"
         ) from exc
 
 
