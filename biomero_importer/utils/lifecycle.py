@@ -26,6 +26,7 @@ import os
 from pathlib import Path, PurePosixPath
 from typing import Iterator, Literal, Sequence
 
+from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
 from biomero_schema.imports import (
@@ -175,6 +176,12 @@ class PreparedStore:
     items: tuple[PreparedImportItem, ...]
     decision: ReturnedZarrDecision | None = None
 
+
+# Hint shared by the errors of a result the installed shallower cannot parse.
+VERSION_MISMATCH_HINT = (
+    "Install the matching biomero-shallower in the importer "
+    "or rerun the workflow with matching versions"
+)
 
 # Persisted keys, in order, of the three kinds of import storage records.
 _RECORD_HEAD_FIELDS = ("schema", "workflow_id", "storage", "location")
@@ -1041,11 +1048,7 @@ class ImportLifecycleEngine:
             if not version_mismatch:
                 raise
             raise ValueError(
-                f"Remote shallow result from biomero-shallower "
-                f"{receipt.tool_version} (image {receipt.image}) is not "
-                f"compatible with installed {shallower_version}: {exc}. "
-                "Install the matching biomero-shallower in the importer "
-                "or rerun the workflow with matching versions") from exc
+                self._unparseable_result_message(receipt, exc)) from exc
         if version_mismatch:
             self.logger.warning(
                 f"Remote shallower version {receipt.tool_version} "
@@ -1054,6 +1057,44 @@ class ImportLifecycleEngine:
                 "with the installed package"
             )
         return report
+
+    @staticmethod
+    def _unparseable_result_message(
+        receipt: RemoteShallowReceipt,
+        error: Exception,
+        installed_version: str = shallower_version,
+    ) -> str:
+        """
+        Explain why the installed shallower cannot parse a remote result.
+
+        Readers keep accepting older schema numbers, so a result that
+        cannot be parsed was most likely written by a newer shallower.
+
+        Args:
+            receipt (RemoteShallowReceipt): The receipt of the remote helper.
+            error (Exception): The parse or validation error.
+            installed_version (str): The installed shallower version.
+
+        Returns:
+            str: The error message, with the install hint when the receipt
+                version is newer than the installed one.
+        """
+        try:
+            written_by_newer = (
+                Version(receipt.tool_version) > Version(installed_version))
+        except InvalidVersion:
+            written_by_newer = False
+        if written_by_newer:
+            return (
+                f"Remote shallow result was written by a newer "
+                f"biomero-shallower ({receipt.tool_version}, image "
+                f"{receipt.image}) than the one installed "
+                f"({installed_version}): {error}. {VERSION_MISMATCH_HINT}")
+        return (
+            f"Remote shallow result from biomero-shallower "
+            f"{receipt.tool_version} (image {receipt.image}) cannot be "
+            f"read by installed {installed_version}: {error}. "
+            f"{VERSION_MISMATCH_HINT}")
 
     def _set_aside_remote_attempt(self, root: Path) -> None:
         """

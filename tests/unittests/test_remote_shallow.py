@@ -15,7 +15,6 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 import hashlib
-import re
 import json
 from unittest.mock import patch
 
@@ -157,14 +156,34 @@ def _receipt_for(root, options, helper_version):
         operation.model_copy(update={'remote_receipts': (receipt,)}),))
 
 
-def test_remote_version_mismatch_with_newer_report_schema_fails_with_hint(tmp_path, monkeypatch, caplog):
-    root, options = fixture(tmp_path, monkeypatch, helper_version='0.0.1')
+def _prepare_with_unreadable_report(tmp_path, monkeypatch, helper_version):
+    root, options = fixture(tmp_path, monkeypatch, helper_version=helper_version)
     report = root / SHALLOW_OPERATION_REPORT
     report.write_text(report.read_text().replace('"schema": 1', '"schema": 2', 1))
-    options = _receipt_for(root, options, '0.0.1')
-    with pytest.raises(ValueError, match=rf'(?s)0\.0\.1.*not compatible with installed {re.escape(shallower_version)}.*Install the matching'):
-        ImportLifecycleEngine().prepare([root], options)
+    options = _receipt_for(root, options, helper_version)
+    return ImportLifecycleEngine().prepare([root], options)
+
+
+def test_remote_result_from_newer_shallower_fails_naming_both_versions(tmp_path, monkeypatch, caplog):
+    newer_version = '99.0.0'
+    with pytest.raises(ValueError) as raised:
+        _prepare_with_unreadable_report(tmp_path, monkeypatch, newer_version)
+    message = str(raised.value)
+    assert 'written by a newer biomero-shallower' in message
+    assert newer_version in message
+    assert f'than the one installed ({shallower_version})' in message
+    assert 'Install the matching biomero-shallower' in message
     assert 'validated with the installed package' not in caplog.text
+
+
+def test_remote_result_from_older_shallower_with_parse_failure_is_neutral(tmp_path, monkeypatch):
+    older_version = '0.0.1'
+    with pytest.raises(ValueError) as raised:
+        _prepare_with_unreadable_report(tmp_path, monkeypatch, older_version)
+    message = str(raised.value)
+    assert 'newer' not in message
+    assert older_version in message
+    assert f'cannot be read by installed {shallower_version}' in message
 
 
 def test_remote_version_mismatch_integrity_failure_keeps_original_message(tmp_path, monkeypatch):
