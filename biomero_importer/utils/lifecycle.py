@@ -17,7 +17,7 @@
 """Registration-independent lifecycle operations for importer orders."""
 
 from contextlib import ExitStack, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import errno
 import hashlib
 import json
@@ -30,8 +30,16 @@ from packaging.version import InvalidVersion, Version
 from pydantic import ValidationError
 
 from biomero_schema.imports import (
+    IMPORT_STORAGE_FILENAME,
+    IMPORT_STORAGE_FULL,
+    IMPORT_STORAGE_SCHEMA,
+    IMPORT_STORAGE_SHALLOW,
     SHALLOW_ZARR_OPERATION,
     ImportOptionsEnvelope,
+    ImporterFullImportStorageRecord,
+    ImporterShallowImportStorageRecord,
+    ImportStorageRecordUnion,
+    RemoteImportStorageRecord,
     ShallowZarrImportOperation,
     parse_import_options,
 )
@@ -82,16 +90,11 @@ from .shallow_settings import (
     env_flag_enabled,
 )
 
-# Provenance and fallback files written next to a result store.
-IMPORT_STORAGE_FILENAME = ".biomero-import-storage.json"
-REMOTE_ATTEMPT_FILENAME = ".biomero-remote-attempt.json"
-IMPORT_STORAGE_SCHEMA_VERSION = 1
+logger = logging.getLogger(__name__)
 
-# Values recorded in the import storage file.
-STORAGE_SHALLOW = "shallow-zarr"
-STORAGE_FULL = "full-zarr"
-LOCATION_REMOTE = "remote"
-LOCATION_IMPORTER = "importer"
+# Fallback file written next to a result store; the provenance file name
+# (IMPORT_STORAGE_FILENAME) comes from biomero-schema.
+REMOTE_ATTEMPT_FILENAME = ".biomero-remote-attempt.json"
 
 # Zarr store layout and NGFF node roles.
 ZARR_DIRECTORY_SUFFIX = ".zarr"
@@ -183,77 +186,26 @@ VERSION_MISMATCH_HINT = (
     "or rerun the workflow with matching versions"
 )
 
-# Persisted keys, in order, of the three kinds of import storage records.
-_RECORD_HEAD_FIELDS = ("schema", "workflow_id", "storage", "location")
-_REMOTE_RECORD_FIELDS = _RECORD_HEAD_FIELDS + (
-    "decision_basis", "container", "tool_version", "task_id", "job_id",
-    "report_sha256",
-)
-_IMPORTER_FULL_RECORD_FIELDS = _RECORD_HEAD_FIELDS + ("tool_version", "reason")
-_IMPORTER_SHALLOW_RECORD_FIELDS = _RECORD_HEAD_FIELDS + (
-    "tool_version", "decision_basis",
-)
 
-
-@dataclass(frozen=True)
-class ImportStorageRecord:
+def write_import_storage_record(
+    root: Path, record: ImportStorageRecordUnion
+) -> None:
     """
-    Content of the versioned ``.biomero-import-storage.json`` file.
+    Write the versioned import storage record next to a result store.
 
-    The persisted format is read by other BIOMERO components, so each kind of
-    record keeps exactly its field set and key order; a field that applies but
-    has no value (a missing Slurm job id) is written as ``null``.
+    The persisted format is read by other BIOMERO components and defined by
+    the biomero-schema models, so each kind of record keeps exactly its field
+    set; a field that applies but has no value is written as ``null``.
 
-    Attributes:
-        workflow_id (str): The workflow the result belongs to.
-        storage (str): ``STORAGE_SHALLOW`` or ``STORAGE_FULL``.
-        location (str): ``LOCATION_REMOTE`` or ``LOCATION_IMPORTER``.
-        tool_version (str | None): Shallower version that handled the result.
-        decision_basis (str | None): Why the result was shallowed.
-        reason (str | None): Why the full result was kept.
-        container (str | None): Remote helper image.
-        task_id (str | None): Remote helper task.
-        job_id (str | None): Slurm job of the remote helper.
-        report_sha256 (str | None): Checksum of the remote report.
-        schema (int): Version of this record format.
+    Args:
+        root (Path): The result store the record describes.
+        record (ImportStorageRecordUnion): The record to persist.
     """
-
-    workflow_id: str
-    storage: str
-    location: str
-    tool_version: str | None = None
-    decision_basis: str | None = None
-    reason: str | None = None
-    container: str | None = None
-    task_id: str | None = None
-    job_id: str | None = None
-    report_sha256: str | None = None
-    schema: int = IMPORT_STORAGE_SCHEMA_VERSION
-
-    def to_dict(self) -> dict:
-        """
-        Serialize with the field set and key order of this kind of record.
-
-        Returns:
-            dict: The record as persisted, in key order.
-        """
-        if self.location == LOCATION_REMOTE:
-            field_names = _REMOTE_RECORD_FIELDS
-        elif self.storage == STORAGE_FULL:
-            field_names = _IMPORTER_FULL_RECORD_FIELDS
-        else:
-            field_names = _IMPORTER_SHALLOW_RECORD_FIELDS
-        values = asdict(self)
-        return {name: values[name] for name in field_names}
-
-    def write(self, root: Path) -> None:
-        """
-        Write the record next to the result store.
-
-        Args:
-            root (Path): The result store the record describes.
-        """
-        write_json(root / IMPORT_STORAGE_FILENAME, self.to_dict())
+    record_path = root / IMPORT_STORAGE_FILENAME
+    logger.info(
+        f"Recording {record.storage} on {record.location} for {root} in "
+        f"{record_path}")
+    write_json(record_path, record.to_dict())
 
 
 def _positive_int_env(name: str, default: int, logger: logging.Logger) -> int:
@@ -342,7 +294,7 @@ def _recover_result_store(root: Path) -> Iterator[None]:
             if exc.errno not in (errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP):
                 raise
             _require_no_pending_prune(root)
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 f"Filesystem locking is unsupported for {root}; using legacy "
                 "import preparation without recovery or concurrency protection")
             yield
@@ -648,13 +600,12 @@ def _write_full_storage(
         operation (ShallowZarrImportOperation): The requested operation.
         reason (str): Why the full result was kept.
     """
-    ImportStorageRecord(
-        workflow_id=str(operation.canonical_inputs.workflow_id),
-        storage=STORAGE_FULL,
-        location=LOCATION_IMPORTER,
+    write_import_storage_record(root, ImporterFullImportStorageRecord(
+        schema=IMPORT_STORAGE_SCHEMA,
+        workflow_id=operation.canonical_inputs.workflow_id,
         tool_version=shallower_version,
         reason=reason,
-    ).write(root)
+    ))
 
 
 def _keep_full_level(reason: str) -> int:
@@ -932,17 +883,18 @@ class ImportLifecycleEngine:
                 load_managed_storage_roots(),
             )
         remote_kept_full = report.result == RESULT_KEPT_FULL
-        ImportStorageRecord(
-            workflow_id=str(operation.canonical_inputs.workflow_id),
-            storage=STORAGE_FULL if remote_kept_full else STORAGE_SHALLOW,
-            location=LOCATION_REMOTE,
+        write_import_storage_record(root, RemoteImportStorageRecord(
+            schema=IMPORT_STORAGE_SCHEMA,
+            workflow_id=operation.canonical_inputs.workflow_id,
+            storage=IMPORT_STORAGE_FULL if remote_kept_full
+            else IMPORT_STORAGE_SHALLOW,
             decision_basis=report.reason,
             container=receipt.image,
             tool_version=receipt.tool_version,
             task_id=str(receipt.task_id),
             job_id=receipt.slurm_job_id,
             report_sha256=receipt.report_sha256,
-        ).write(root)
+        ))
         if remote_kept_full:
             self.logger.log(
                 _keep_full_level(report.reason),
@@ -1207,13 +1159,12 @@ class ImportLifecycleEngine:
                 "cleanup", exc_info=True,
             )
             manifest = _load_committed_manifest(root)
-        ImportStorageRecord(
-            workflow_id=str(operation.canonical_inputs.workflow_id),
-            storage=STORAGE_SHALLOW,
-            location=LOCATION_IMPORTER,
+        write_import_storage_record(root, ImporterShallowImportStorageRecord(
+            schema=IMPORT_STORAGE_SCHEMA,
+            workflow_id=operation.canonical_inputs.workflow_id,
             tool_version=shallower_version,
             decision_basis=decision.reason,
-        ).write(root)
+        ))
         self.logger.info(
             f"Stored shallow Zarr {root} with "
             f"{len(manifest.collection.images)} image node(s)"

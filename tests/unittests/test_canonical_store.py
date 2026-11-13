@@ -661,6 +661,149 @@ def test_creation_lock_is_exclusive(tmp_path, source_record):
                 pass
 
 
+def old_format_marker_text(source_record):
+    """The marker text importer betas 6 to 13 wrote."""
+    return json.dumps(
+        {"markerSchema": 1, "state": "committed", "source": source_record},
+        indent=2, sort_keys=True)
+
+
+def test_committed_marker_is_written_byte_for_byte_as_before(
+        tmp_path, source_record):
+    staging = tmp_path / "staging.ome.zarr"
+    make_zarr_v2(staging)
+
+    committed = CanonicalStore(tmp_path).commit(staging, source_record)
+
+    assert (committed / CANONICAL_MARKER_NAME).read_text(
+        encoding="utf-8") == old_format_marker_text(source_record)
+
+
+def test_indexed_sidecar_is_written_byte_for_byte_as_before(
+        tmp_path, source_record):
+    native = tmp_path / "project" / "cells.ome.zarr"
+    make_zarr_v2(native)
+
+    marker_path = write_indexed_canonical_marker(native, source_record)
+
+    assert marker_path.read_text(
+        encoding="utf-8") == old_format_marker_text(source_record)
+
+
+def test_marker_name_and_schema_are_the_schema_constants():
+    # biomero-scripts import these names from canonical_store.
+    import biomero_schema.zarr as schema_zarr
+    assert canonical_store.CANONICAL_MARKER_NAME is schema_zarr.CANONICAL_MARKER_NAME
+    assert canonical_store.CANONICAL_MARKER_SCHEMA == schema_zarr.CANONICAL_MARKER_SCHEMA
+    assert CANONICAL_MARKER_NAME == ".biomero-canonical.json"
+
+
+def test_loads_old_format_internal_marker(tmp_path, source_record):
+    zarr_path = tmp_path / "project" / ".processed" / "Image-3207.ome.zarr"
+    make_zarr_v2(zarr_path)
+    (zarr_path / CANONICAL_MARKER_NAME).write_text(
+        old_format_marker_text(source_record), encoding="utf-8")
+
+    loaded = load_canonical_marker(zarr_path)
+
+    assert loaded.to_dict() == source_record
+
+
+@pytest.mark.parametrize("marker", [
+    {"markerSchema": 2, "state": "committed"},
+    {"markerSchema": 1, "state": "staging"},
+    {"state": "committed"},
+    {"markerSchema": 1, "state": "committed"},
+    {"markerSchema": 1, "state": "committed", "source": {"schema": 1}},
+    {"markerSchema": 1, "state": "committed", "source": "not-a-source"},
+    ["not", "an", "object"],
+], ids=["future-schema", "not-committed", "no-schema", "no-source",
+        "invalid-source", "source-not-object", "not-a-mapping"])
+def test_invalid_marker_is_reported_as_invalid_canonical_store(
+        tmp_path, source_record, marker):
+    destination = tmp_path / source_record["relativePath"]
+    make_zarr_v2(destination)
+    (destination / CANONICAL_MARKER_NAME).write_text(
+        json.dumps(marker), encoding="utf-8")
+
+    with pytest.raises(InvalidCanonicalStore):
+        CanonicalStore(tmp_path).adopt(source_record)
+    with pytest.raises(InvalidCanonicalStore):
+        load_canonical_marker(destination)
+
+
+@pytest.fixture
+def plate_record(source_record):
+    """A Plate source as the plain dict biomero-scripts pass in."""
+    image_source = CanonicalZarrSource.from_dict({
+        **source_record,
+        "relativePath": "project/.processed/Plate-9.ome.zarr",
+        "nodePath": "A/1/0",
+        "sourceObjectType": "Plate",
+        "sourceObjectId": 9,
+        "canonicalPixelVerified": False,
+    })
+    return CanonicalPlateSource(
+        storageRoot="group-5-data",
+        relativePath="project/.processed/Plate-9.ome.zarr",
+        sourceObjectId=9,
+        sourceGeneration=1,
+        interchangeProfile="ngff-0.4-zarr-v2",
+        images=(CanonicalPlateImage(
+            imageNodePath="A/1/0", source=image_source),),
+    ).to_dict()
+
+
+def test_plate_source_as_dict_is_committed_and_adopted_as_a_plate(
+        tmp_path, plate_record):
+    store = CanonicalStore(tmp_path)
+    staging = tmp_path / "staging.ome.zarr"
+    make_zarr_v2(staging)
+
+    committed = store.commit(staging, plate_record)
+
+    assert (committed / CANONICAL_MARKER_NAME).read_text(
+        encoding="utf-8") == old_format_marker_text(plate_record)
+    assert store.adopt(plate_record) == committed
+    assert isinstance(load_canonical_marker(committed), CanonicalPlateSource)
+
+
+def test_plate_sidecar_is_written_byte_for_byte_as_before(
+        tmp_path, plate_record):
+    native = tmp_path / "plate.ome.zarr"
+    make_zarr_v2(native)
+
+    marker_path = write_indexed_canonical_marker(native, plate_record)
+
+    assert marker_path.read_text(
+        encoding="utf-8") == old_format_marker_text(plate_record)
+
+
+def test_marker_with_unknown_top_level_key_is_rejected(
+        tmp_path, source_record):
+    destination = tmp_path / source_record["relativePath"]
+    make_zarr_v2(destination)
+    marker = json.loads(old_format_marker_text(source_record))
+    marker["writtenBy"] = "someone"
+    (destination / CANONICAL_MARKER_NAME).write_text(
+        json.dumps(marker), encoding="utf-8")
+
+    with pytest.raises(InvalidCanonicalStore, match="writtenBy"):
+        load_canonical_marker(destination)
+
+
+def test_invalid_marker_message_names_what_failed(tmp_path, source_record):
+    destination = tmp_path / source_record["relativePath"]
+    make_zarr_v2(destination)
+    marker = json.loads(old_format_marker_text(source_record))
+    marker["state"] = "staging"
+    (destination / CANONICAL_MARKER_NAME).write_text(
+        json.dumps(marker), encoding="utf-8")
+
+    with pytest.raises(InvalidCanonicalStore, match="state: .*committed"):
+        load_canonical_marker(destination)
+
+
 # A child process takes the creation lock, reports readiness on stdout and
 # then waits for stdin to close, so tests control when it holds the lock.
 LOCK_HOLDER_SCRIPT = """

@@ -283,3 +283,35 @@ def test_kept_full_receipt_refreshes_source_cache_without_repeating_comparison(
         assert load_canonical_marker(original) is None
         assert 'continuing with the validated result' in caplog.text
     assert (root / '0/0.0.0.0').exists()
+
+
+def _remote_record(root, **expected):
+    """Expect the exact import storage record the importer wrote."""
+    report_sha256 = hashlib.sha256(
+        (root / SHALLOW_OPERATION_REPORT).read_bytes()).hexdigest()
+    return {
+        'schema': 1,
+        'workflow_id': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        'location': 'remote',
+        'container': 'helper:0.1.0',
+        'tool_version': shallower_version,
+        'task_id': 'cccccccc-cccc-cccc-cccc-cccccccccccc',
+        'job_id': '123',
+        'report_sha256': report_sha256,
+        **expected,
+    }
+
+
+def test_remote_shallow_result_records_the_full_import_storage_record(tmp_path, monkeypatch):
+    root, options = fixture(tmp_path, monkeypatch)
+    ImportLifecycleEngine().prepare([root], options)
+    assert json.loads((root / '.biomero-import-storage.json').read_text()) == _remote_record(
+        root, storage='shallow-zarr', decision_basis='input-image-unchanged')
+
+
+def test_remote_kept_full_result_records_the_full_import_storage_record(tmp_path, monkeypatch):
+    root, options = fixture(tmp_path, monkeypatch,
+                            provider=IdentityProvider(_identity('ISCC:ICHANGED')))
+    ImportLifecycleEngine().prepare([root], options)
+    assert json.loads((root / '.biomero-import-storage.json').read_text()) == _remote_record(
+        root, storage='full-zarr', decision_basis='no-input-identity-match')
