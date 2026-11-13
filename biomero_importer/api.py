@@ -1,3 +1,19 @@
+# -*- coding: utf-8 -*-
+# Copyright (C) 2026 Torec Luik
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 """Stable client-facing API for BIOMERO.importer upload orders."""
 
 from copy import deepcopy
@@ -11,6 +27,11 @@ from biomero_schema.imports import (
 )
 
 from .utils.ingest_tracker import STAGE_NEW_ORDER, log_ingestion_step
+from .utils.shallow_settings import (
+    DEFAULT_SHALLOW_ZARR,
+    ENV_SHALLOW_ZARR,
+    env_flag_enabled,
+)
 
 
 IMPORTER_API_SCHEMA = 1
@@ -18,12 +39,6 @@ IMPORTER_API_SCHEMA = 1
 
 class UnsupportedImportOperation(ValueError):
     """Raised when an order requests an unavailable lifecycle operation."""
-
-
-def _flag_enabled(name: str, default: bool = False) -> bool:
-    import os
-
-    return os.getenv(name, str(default)).strip().lower() == "true"
 
 
 def _identity_dependency_available() -> bool:
@@ -38,7 +53,7 @@ def get_importer_capabilities() -> dict[str, Any]:
 
     operations = []
     configuration_errors = []
-    shallow_enabled = _flag_enabled("BIOMERO_SHALLOW_ZARR")
+    shallow_enabled = env_flag_enabled(ENV_SHALLOW_ZARR, DEFAULT_SHALLOW_ZARR)
     identity_available = (
         _identity_dependency_available() if shallow_enabled else False
     )
@@ -100,7 +115,7 @@ def submit_import_order(
             operation.kind for operation in envelope.operations
         )
         if (
-            _flag_enabled("BIOMERO_SHALLOW_ZARR")
+            env_flag_enabled(ENV_SHALLOW_ZARR, DEFAULT_SHALLOW_ZARR)
             and any(
                 operation.kind == SHALLOW_ZARR_OPERATION
                 for operation in envelope.operations

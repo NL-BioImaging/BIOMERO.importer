@@ -56,14 +56,21 @@ transfers full results and performs shallowing on the importer host.
 `BIOMERO_SHALLOW_ZARR_WORKERS` controls local identity parallelism; choose it
 for the host's CPU and storage capacity.
 
-For remote shallowing, enable `BIOMERO_REMOTE_SHALLOW_ZARR` and configure
-`BIOMERO_REMOTE_SHALLOWER_IMAGE` and `BIOMERO_REMOTE_SHALLOWER_VERSION`
-identically on the workflow worker and importer. Select the container from
-the [shallower releases](https://github.com/NL-BioImaging/BIOMERO.shallower/releases)
-and use the Python package version reported by that container's
-`biomero-shallower --version`. Docker tag spelling and Python version spelling
-can differ for prereleases. Dependency compatibility is maintained in
-`pyproject.toml`, not in this guide.
+For remote shallowing, enable `BIOMERO_REMOTE_SHALLOW_ZARR`. Receipt trust
+assumes that the sender of the import order, BIOMERO's own scripts, is trusted;
+this is a deliberate decision, so there is no allow-list of helper images or
+versions. The receipt's report checksum binds the report to the receipt but is
+not independent of it, because both arrive in the same import options. The
+importer also validates the report and manifest with its installed
+`biomero-shallower` package, and only logs the receipt's image. If the receipt
+reports another shallower version, the importer logs a warning naming both
+versions and the image after validation succeeds. A kept-full result is
+imported in full and a compatible shallow result is accepted. If the installed
+package cannot parse the report or manifest (incompatible schema, including
+unknown fields), the import fails with an error naming both versions; install
+the matching `biomero-shallower` in the importer or rerun the workflow. A
+result the helper already shallowed cannot be kept full. Dependency
+compatibility is maintained in `pyproject.toml`, not in this guide.
 
 The importer does not submit or download the Slurm helper. Image acquisition,
 initialization and worker configuration are described in the
@@ -126,6 +133,17 @@ Recovery is automatic within an explicitly requested shallow lifecycle operation
 and needs no additional feature flag. `BIOMERO_SHALLOW_ZARR=true` is still
 required; disabled shallow operations are rejected before locking or recovery.
 Remote receipts also require `BIOMERO_REMOTE_SHALLOW_ZARR` to remain enabled.
+If local shallowing fails after the eligibility check (corrupt metadata,
+identity or filesystem errors), the transaction is rolled back, a warning is
+logged and the full result is imported, recorded as `full-zarr` with reason
+`normalization-failed: <error>`. If the failure happens after the commit point
+(for example while deleting the rollback folder), the committed shallow result
+is used and the next automatic recovery finishes the cleanup of the leftover
+`.<name>.biomero-prune-*` folder. Never delete that folder or its journal by
+hand: the journal is what lets recovery restore or finish a prune. From the
+biomero-shallower release with the cleanup fix (BIOMERO.shallower#35) the
+journal is deleted last, so a missing journal with pruned arrays left behind
+cannot result from an interrupted post-commit cleanup.
 Ordinary imports without a lifecycle operation are unaffected, even when shallow
 storage is enabled. Before inspecting a shallow result,
 the importer obtains the shared

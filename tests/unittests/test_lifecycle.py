@@ -1,5 +1,22 @@
+# -*- coding: utf-8 -*-
+# Copyright (C) 2026 Torec Luik
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 import errno
 import json
+import os
 from pathlib import Path
 from unittest.mock import Mock
 from uuid import UUID
@@ -25,14 +42,15 @@ from biomero_schema.zarr import (
     ZarrLabelComponent,
 )
 
-from biomero_importer.utils.lifecycle import ImportLifecycleEngine
+from biomero_importer.utils.lifecycle import ImportLifecycleEngine, _prune_committed
 from biomero_importer.utils.importer import DataPackageImporter
+from biomero_importer.utils.pixel_identity import PixelIdentityError
 from biomero_importer.utils.result_zarr import (
     NormalizedShallowResult,
     ReturnedZarrDecision,
 )
 from biomero_shallower.operations import locked
-from biomero_shallower.transaction import begin
+from biomero_shallower.transaction import begin, commit, rollback_path
 
 
 WORKFLOW_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -343,6 +361,25 @@ def test_disabled_shallow_operation_cannot_start_recovery(
         ImportLifecycleEngine().prepare([_zarr(tmp_path)], _options())
 
 
+@pytest.mark.parametrize("reason, level", [
+    ("pixels-differ", "INFO"),
+    ("identity-unavailable: boom", "WARNING"),
+])
+def test_keep_full_decision_is_logged_at_matching_level(tmp_path, monkeypatch, caplog, reason, level):
+    root = _zarr(tmp_path)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="keep-full", reason=reason),
+    )
+    with caplog.at_level("INFO", logger="biomero_importer.utils.lifecycle"):
+        ImportLifecycleEngine().prepare([root], _options())
+    records = [r for r in caplog.records
+               if "Returned Zarr decision" in r.getMessage() and reason in r.getMessage()]
+    assert [r.levelname for r in records] == [level]
+
+
 def test_legacy_passthrough_decision_does_not_suppress_registration(tmp_path, monkeypatch):
     root = _zarr(tmp_path)
     monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
@@ -395,6 +432,222 @@ def test_eligible_image_keeps_primary_and_adds_label_registration_view(tmp_path,
     assert provenance['location'] == 'importer'
     assert provenance['tool_version']
     assert provenance['workflow_id'] == str(WORKFLOW_ID)
+
+
+@pytest.mark.parametrize("error", [PixelIdentityError("not matching"), OSError(errno.EIO, "io")])
+def test_pruning_failure_keeps_and_imports_full_result(tmp_path, monkeypatch, caplog, error):
+    root = _zarr(tmp_path)
+    recovered = Mock()
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr("biomero_importer.utils.lifecycle.recover", recovered)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="eligible", reason="matched"),
+    )
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr", fail)
+
+    plan = ImportLifecycleEngine().prepare([root], _options())
+
+    assert [(item.path, item.role) for item in plan.items] == [(root, "primary")]
+    provenance = json.loads((root / ".biomero-import-storage.json").read_text())
+    assert provenance["storage"] == "full-zarr"
+    assert provenance["reason"].startswith("normalization-failed")
+    assert "importing the full result" in caplog.text
+    assert recovered.call_count == 2  # store recovery plus post-failure check
+
+
+def test_failure_after_commit_uses_committed_shallow_result(tmp_path, monkeypatch, caplog):
+    root = _zarr(tmp_path)
+    manifest = _manifest()
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="eligible", reason="matched"),
+    )
+    recovered = Mock()
+    monkeypatch.setattr("biomero_importer.utils.lifecycle.recover", recovered)
+
+    def commit_then_fail(*args, **kwargs):
+        # Manifest committed, journal already gone.
+        (root / ".biomero-shallow.json").write_text("{}", encoding="utf-8")
+        raise OSError(errno.EIO, "cleanup failed")
+
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr", commit_then_fail)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle._load_shallow_manifest",
+        lambda path: manifest if (path / ".biomero-shallow.json").exists() else None)
+
+    plan = ImportLifecycleEngine().prepare([root], _options())
+
+    assert (root, "primary") in [(item.path, item.role) for item in plan.items]
+    provenance = json.loads((root / ".biomero-import-storage.json").read_text())
+    assert provenance["storage"] == "shallow-zarr"
+    assert "committed shallow result" in caplog.text
+    assert recovered.call_count == 1  # only the store recovery before evaluation
+
+
+def _real_pruning_setup(tmp_path, monkeypatch, replace):
+    from functools import partial
+    from test_result_zarr import (
+        _make_image, _manifest as _result_manifest, _input,
+        _identity as _result_identity, IdentityProvider)
+    from biomero_importer.utils.result_zarr import (
+        evaluate_returned_zarr, normalize_returned_zarr)
+    root = tmp_path / "result.zarr"
+    _make_image(root, labels=("cells",))
+    manifest = _result_manifest(_input(0, "result.zarr"))
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        partial(evaluate_returned_zarr,
+                identity_provider=IdentityProvider(_result_identity())))
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr",
+        partial(normalize_returned_zarr, move=replace))
+    options = ImportOptionsEnvelope(operations=(ShallowZarrImportOperation(
+        canonicalInputs=manifest),))
+    return root, options
+
+
+def _failing_replace(source, target):
+    raise OSError(errno.EIO, "move failed")
+
+
+def test_real_pruning_failure_restores_arrays_and_imports_full(tmp_path, monkeypatch):
+    root, options = _real_pruning_setup(tmp_path, monkeypatch, _failing_replace)
+
+    plan = ImportLifecycleEngine().prepare([root], options)
+
+    assert (root / "0" / "0.0.0.0").is_file()
+    assert not (root / ".biomero-shallow.json").exists()
+    assert not list(tmp_path.glob(".result.zarr.biomero-prune-*"))
+    assert plan.items[0].path == root
+    provenance = json.loads((root / ".biomero-import-storage.json").read_text())
+    assert provenance["storage"] == "full-zarr"
+
+
+def test_real_pruning_failure_with_failed_recovery_does_not_fall_back(tmp_path, monkeypatch):
+    root, options = _real_pruning_setup(tmp_path, monkeypatch, _failing_replace)
+
+    def broken(*args, **kwargs):
+        raise ValueError("Conflicting recovery paths; refusing data loss")
+
+    monkeypatch.setattr("biomero_shallower.transaction.recover", broken)
+    # The store recovery before evaluation succeeds; later calls fail.
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.recover",
+        Mock(side_effect=[None, ValueError("Conflicting recovery paths")]))
+
+    with pytest.raises(ValueError, match="Conflicting recovery"):
+        ImportLifecycleEngine().prepare([root], options)
+
+    assert not (root / ".biomero-import-storage.json").exists()
+
+
+def test_corrupt_metadata_during_pruning_keeps_full_result(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="eligible", reason="matched"),
+    )
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr",
+        Mock(side_effect=json.JSONDecodeError("bad", "{", 0)))
+    plan = ImportLifecycleEngine().prepare([root], _options())
+    assert [(item.path, item.role) for item in plan.items] == [(root, "primary")]
+
+
+def _prune_state(tmp_path, journal):
+    """A store with a shallow manifest and, optionally, a prune journal.
+
+    ``journal`` is None (no journal), "committed", "uncommitted" or raw text
+    written as an unreadable journal.
+    """
+    root = _zarr(tmp_path)
+    (root / ".biomero-shallow.json").write_text("{}", encoding="utf-8")
+    if journal is None:
+        return root
+    rollback = rollback_path(root, "abc")
+    rollback.mkdir()
+    if journal in ("committed", "uncommitted"):
+        written = begin(root, rollback, [], {})
+        if journal == "committed":
+            commit(written)
+    else:
+        (rollback / "journal.json").write_text(journal, encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize("journal, committed", [
+    (None, True),
+    ("committed", True),
+    ("uncommitted", False),
+    ("not json", False),
+    ("[]", False),
+    ("null", False),
+])
+def test_prune_committed_reads_the_journal(tmp_path, journal, committed):
+    root = _prune_state(tmp_path, journal)
+    assert _prune_committed(root, Mock()) is committed
+
+
+def test_prune_without_manifest_is_not_committed(tmp_path):
+    root = _zarr(tmp_path)
+    assert _prune_committed(root, Mock()) is False
+
+
+def test_unreadable_prune_journal_is_logged(tmp_path):
+    root = _prune_state(tmp_path, "not json")
+    logger = Mock()
+    _prune_committed(root, logger)
+    assert "treating the prune as uncommitted" in logger.warning.call_args.args[0]
+
+
+def test_failing_before_commit_rolls_back_and_imports_full(tmp_path, monkeypatch):
+    from functools import partial
+    from biomero_importer.utils.result_zarr import normalize_returned_zarr
+
+    def refuse_commit(collection):
+        raise OSError(errno.EIO, "cannot commit")
+
+    root, options = _real_pruning_setup(tmp_path, monkeypatch, os.replace)
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr",
+        partial(normalize_returned_zarr, before_commit=refuse_commit))
+
+    plan = ImportLifecycleEngine().prepare([root], options)
+
+    assert (root / "0" / "0.0.0.0").is_file()
+    assert not (root / ".biomero-shallow.json").exists()
+    assert not list(tmp_path.glob(".result.zarr.biomero-prune-*"))
+    assert plan.items[0].path == root
+    provenance = json.loads((root / ".biomero-import-storage.json").read_text())
+    assert provenance["storage"] == "full-zarr"
+
+
+def test_programming_error_during_pruning_still_fails(tmp_path, monkeypatch):
+    root = _zarr(tmp_path)
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", "true")
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.evaluate_returned_zarr",
+        lambda *args, **kwargs: ReturnedZarrDecision(
+            store_path=root, outcome="eligible", reason="matched"),
+    )
+    monkeypatch.setattr(
+        "biomero_importer.utils.lifecycle.normalize_returned_zarr",
+        Mock(side_effect=KeyError("bug")))
+    with pytest.raises(KeyError):
+        ImportLifecycleEngine().prepare([root], _options())
 
 
 def test_label_free_shallow_image_keeps_primary_registration(tmp_path, monkeypatch):
@@ -549,3 +802,59 @@ def test_prepared_views_use_existing_upload_path_and_restore_envelope(tmp_path):
         "schema": 2,
         "operations": [],
     }
+
+
+def test_committed_prune_without_manifest_raises(tmp_path):
+    from biomero_importer.utils.lifecycle import _load_committed_manifest
+    with pytest.raises(PixelIdentityError, match="has no manifest"):
+        _load_committed_manifest(_zarr(tmp_path))
+
+
+@pytest.mark.parametrize("value, default, expected", [
+    (None, False, False), (None, True, True), ("TRUE", False, True),
+    (" true ", False, True), ("false", True, False), ("yes", True, False),
+])
+def test_env_flag_is_parsed_in_one_place(monkeypatch, value, default, expected):
+    from biomero_importer.utils.shallow_settings import env_flag_enabled
+    if value is None:
+        monkeypatch.delenv("FLAG_UNDER_TEST", raising=False)
+    else:
+        monkeypatch.setenv("FLAG_UNDER_TEST", value)
+    assert env_flag_enabled("FLAG_UNDER_TEST", default) is expected
+
+
+def test_shared_flag_parser_is_used_by_importer_module(monkeypatch):
+    import importlib
+    import biomero_importer.utils.importer as importer_module
+    monkeypatch.setenv("BIOMERO_SHALLOW_ZARR", " true ")
+    try:
+        assert importlib.reload(importer_module).SHALLOW_ZARR_ENABLED is True
+    finally:
+        monkeypatch.undo()
+        importlib.reload(importer_module)
+
+
+def _record(**fields):
+    from biomero_importer.utils.lifecycle import ImportStorageRecord
+    return ImportStorageRecord(workflow_id="wf", **fields)
+
+
+@pytest.mark.parametrize("record, expected", [
+    (_record(storage="shallow-zarr", location="remote", decision_basis="matched",
+             container="helper:1", tool_version="1.0", task_id="t", job_id=None,
+             report_sha256="abc"),
+     '{"schema": 1, "workflow_id": "wf", "storage": "shallow-zarr", '
+     '"location": "remote", "decision_basis": "matched", "container": "helper:1", '
+     '"tool_version": "1.0", "task_id": "t", "job_id": null, "report_sha256": "abc"}'),
+    (_record(storage="shallow-zarr", location="importer", tool_version="1.0",
+             decision_basis="matched"),
+     '{"schema": 1, "workflow_id": "wf", "storage": "shallow-zarr", '
+     '"location": "importer", "tool_version": "1.0", "decision_basis": "matched"}'),
+    (_record(storage="full-zarr", location="importer", tool_version="1.0",
+             reason="pixels-differ"),
+     '{"schema": 1, "workflow_id": "wf", "storage": "full-zarr", '
+     '"location": "importer", "tool_version": "1.0", "reason": "pixels-differ"}'),
+])
+def test_import_storage_record_keeps_its_persisted_format(record, expected):
+    # Other BIOMERO components read this file: pin field set, null and order.
+    assert json.dumps(record.to_dict()) == expected

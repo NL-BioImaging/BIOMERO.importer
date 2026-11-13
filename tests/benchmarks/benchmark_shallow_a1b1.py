@@ -1,3 +1,19 @@
+# -*- coding: utf-8 -*-
+# Copyright (C) 2026 Torec Luik
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 """Profile A1/B1 returned-Plate verification and normalization strategies.
 
 This is a manual benchmark, not part of the unit-test suite.  The full mode
@@ -36,6 +52,13 @@ from biomero_schema.imports import (
 from biomero_importer.utils import lifecycle as lifecycle_module
 from biomero_importer.utils.lifecycle import ImportLifecycleEngine
 from biomero_importer.utils import result_zarr as rz
+# The benchmark times internal stages by wrapping functions where shallower
+# looks them up, so it needs these owning modules (and some private names,
+# which can change between shallower releases): evaluation (identity
+# hashing), normalization (pruning) and ngff (node paths and attributes).
+from biomero_shallower import evaluation as evaluation_module
+from biomero_shallower import ngff as ngff_module
+from biomero_shallower import normalization as normalization_module
 from biomero_importer.utils.pixel_identity import IsccBioIdentityProvider
 
 
@@ -135,8 +158,8 @@ def profile_identity(
     _, canonical, _ = build_contracts(root, manifest_path)
     provider = TimedIdentityProvider()
     timings = defaultdict(float)
-    original_discover = rz.discover_ngff_nodes
-    original_identity_batch = rz._identities_for_nodes
+    original_discover = evaluation_module.discover_ngff_nodes
+    original_identity_batch = evaluation_module._identities_for_nodes
 
     def discover(*args, **kwargs):
         return timed_call(
@@ -159,8 +182,8 @@ def profile_identity(
             **kwargs,
         )
 
-    rz.discover_ngff_nodes = discover
-    rz._identities_for_nodes = identity_batch
+    evaluation_module.discover_ngff_nodes = discover
+    evaluation_module._identities_for_nodes = identity_batch
     started = perf_counter()
     try:
         decision = rz.evaluate_returned_zarr(
@@ -170,8 +193,8 @@ def profile_identity(
             identity_workers=identity_workers,
         )
     finally:
-        rz.discover_ngff_nodes = original_discover
-        rz._identities_for_nodes = original_identity_batch
+        evaluation_module.discover_ngff_nodes = original_discover
+        evaluation_module._identities_for_nodes = original_identity_batch
     total = perf_counter() - started
     return {
         "total_seconds": total,
@@ -196,13 +219,13 @@ def legacy_stage_normalize(root: Path, manifest_path: Path):
     timings = defaultdict(float)
     started = perf_counter()
     nodes = timed_call(
-        timings, "ngff_discovery_seconds", rz.discover_ngff_nodes, root
+        timings, "ngff_discovery_seconds", normalization_module.discover_ngff_nodes, root
     )
     image_nodes = tuple(node for node in nodes if node.role == "image")
     omitted = set()
     planning_started = perf_counter()
     for image_node in image_nodes:
-        omitted.update(rz._declared_image_dataset_directories(
+        omitted.update(normalization_module._declared_image_dataset_directories(
             root,
             image_node.node_path,
         ))
@@ -211,12 +234,12 @@ def legacy_stage_normalize(root: Path, manifest_path: Path):
         for component in decision.label_components
         if component.source is not None
     }
-    omitted.update(rz._node_directory(root, path) for path in inherited)
+    omitted.update(ngff_module.node_directory(root, path) for path in inherited)
     timings["normalization_planning_seconds"] += (
         perf_counter() - planning_started
     )
     bytes_before = timed_call(
-        timings, "tree_size_before_seconds", rz._tree_size, root
+        timings, "tree_size_before_seconds", normalization_module._tree_size, root
     )
     token = uuid4().hex
     staging = root.with_name(f".{root.name}.legacy-stage-{token}")
@@ -237,16 +260,16 @@ def legacy_stage_normalize(root: Path, manifest_path: Path):
     )
     metadata_started = perf_counter()
     for image_node in image_nodes:
-        attrs_path = rz._node_directory(staging, image_node.node_path) / ".zattrs"
-        attrs = rz._read_attrs(attrs_path.parent)
+        attrs_path = ngff_module.node_directory(staging, image_node.node_path) / ".zattrs"
+        attrs = normalization_module.read_attrs(attrs_path.parent)
         attrs.pop("multiscales", None)
         attrs["biomero"] = {
             "model": collection.model,
             "manifest": SHALLOW_COLLECTION_MANIFEST,
             "workflowId": str(collection.workflow_id),
         }
-        rz._write_json(attrs_path, attrs)
-    rz._write_json(
+        normalization_module.write_json(attrs_path, attrs)
+    normalization_module.write_json(
         staging / SHALLOW_COLLECTION_MANIFEST,
         collection.to_dict(),
     )
@@ -259,7 +282,7 @@ def legacy_stage_normalize(root: Path, manifest_path: Path):
     os.replace(staging, root)
     timings["atomic_swap_seconds"] += perf_counter() - swap_started
     bytes_after = timed_call(
-        timings, "tree_size_after_seconds", rz._tree_size, root
+        timings, "tree_size_after_seconds", normalization_module._tree_size, root
     )
     timed_call(
         timings, "delete_full_backup_seconds", shutil.rmtree, backup
@@ -284,12 +307,12 @@ def profile_move_normalize(
     timings = defaultdict(float)
     counts = defaultdict(int)
     originals = {
-        "discover": rz.discover_ngff_nodes,
-        "datasets": rz._declared_image_dataset_directories,
-        "tree_size": rz._tree_size,
-        "read_attrs": rz._read_attrs,
-        "write_json": rz._write_json,
-        "rmtree": rz.shutil.rmtree,
+        "discover": normalization_module.discover_ngff_nodes,
+        "datasets": normalization_module._declared_image_dataset_directories,
+        "tree_size": normalization_module._tree_size,
+        "read_attrs": normalization_module.read_attrs,
+        "write_json": normalization_module.write_json,
+        "rmtree": shutil.rmtree,
     }
 
     def discover(*args, **kwargs):
@@ -342,12 +365,12 @@ def profile_move_normalize(
             timings, "move_arrays_seconds", os.replace, source, target
         )
 
-    rz.discover_ngff_nodes = discover
-    rz._declared_image_dataset_directories = datasets
-    rz._tree_size = tree_size
-    rz._read_attrs = read_attrs
-    rz._write_json = write_json
-    rz.shutil.rmtree = rmtree
+    normalization_module.discover_ngff_nodes = discover
+    normalization_module._declared_image_dataset_directories = datasets
+    normalization_module._tree_size = tree_size
+    normalization_module.read_attrs = read_attrs
+    normalization_module.write_json = write_json
+    shutil.rmtree = rmtree
     started = perf_counter()
     try:
         result = rz.normalize_returned_zarr(
@@ -357,12 +380,12 @@ def profile_move_normalize(
             measure_bytes=measure_bytes,
         )
     finally:
-        rz.discover_ngff_nodes = originals["discover"]
-        rz._declared_image_dataset_directories = originals["datasets"]
-        rz._tree_size = originals["tree_size"]
-        rz._read_attrs = originals["read_attrs"]
-        rz._write_json = originals["write_json"]
-        rz.shutil.rmtree = originals["rmtree"]
+        normalization_module.discover_ngff_nodes = originals["discover"]
+        normalization_module._declared_image_dataset_directories = originals["datasets"]
+        normalization_module._tree_size = originals["tree_size"]
+        normalization_module.read_attrs = originals["read_attrs"]
+        normalization_module.write_json = originals["write_json"]
+        shutil.rmtree = originals["rmtree"]
     total = perf_counter() - started
     return {
         "total_seconds": total,
@@ -403,7 +426,7 @@ def profile_importer_lifecycle(root: Path, manifest_path: Path):
             **kwargs,
         )
 
-    bytes_before = rz._tree_size(root)
+    bytes_before = normalization_module._tree_size(root)
     lifecycle_module.evaluate_returned_zarr = evaluate
     lifecycle_module.normalize_returned_zarr = normalize
     started = perf_counter()
@@ -413,7 +436,7 @@ def profile_importer_lifecycle(root: Path, manifest_path: Path):
         lifecycle_module.evaluate_returned_zarr = original_evaluate
         lifecycle_module.normalize_returned_zarr = original_normalize
     total = perf_counter() - started
-    bytes_after = rz._tree_size(root)
+    bytes_after = normalization_module._tree_size(root)
     roles = defaultdict(int)
     for item in plan.items:
         roles[item.role] += 1
