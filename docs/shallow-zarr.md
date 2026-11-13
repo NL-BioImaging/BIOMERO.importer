@@ -127,6 +127,57 @@ Canonical storage must remain available through the configured shared mounts
 and storage mappings. Deleting or moving the canonical arrays breaks results
 that reference them. See [storage and preprocessing](storage.md).
 
+## Canonical source metadata
+
+Indexing a canonical source records its detailed identities (pixel identity,
+plate image and label inventory) in a canonical marker. This is metadata, not
+another pixel copy.
+
+| Zarr | Marker |
+| --- | --- |
+| Created by BIOMERO (inside a `.processed` folder) | `.biomero-canonical.json` inside the Zarr |
+| Existing user Zarr indexed in place | `<zarr parent>/.processed/.biomero/<zarr name>.canonical.json` |
+
+For example, indexing `/data/groupA/project/cells.ome.zarr` in place writes
+`/data/groupA/project/.processed/.biomero/cells.ome.zarr.canonical.json`. This
+is the same per-directory `.processed` folder BIOMERO already uses for its
+other outputs, and the name comes from `PROCESSED_DATA_FOLDER` (default
+`.processed`). Set it identically wherever BIOMERO code runs (importer and
+OMERO script worker), because the location is derived from it; the worker
+receives it through BIOMERO core's `slurm_env` settings. The value must be one
+folder name; an empty, absolute or multi-segment value is ignored with a
+warning and `.processed` is used.
+
+BIOMERO writes only into its own folders (`.processed`, `.analyzed`); users
+agree not to touch them, and BIOMERO never writes into user folders, because
+users may move or delete their data at any time. The location depends only on
+the Zarr's own path, not on storage mappings, so every component derives the
+same path and it moves or is deleted together with the user's folder.
+`external_canonical_marker_path` in `biomero_importer/utils/canonical_store.py`
+is the single owner of this location; other components call it.
+
+The marker is an optimisation. If the BIOMERO folder cannot be created or
+written (permissions, read-only mount), BIOMERO logs a warning with the path
+and reason and does not index the input: the workflow continues and the input
+is used through the normal path (for an Image, no canonical registration is
+added; for a Plate, no detailed inventory is stored), without shallow result
+matching for that input. A corrupt, uncommitted or unreachable sidecar is
+treated the same way: as absent, with a warning. Every sidecar problem degrades
+to the normal path, so no pre-flight write check is needed.
+
+Earlier betas wrote the marker next to the input, in
+`<input parent>/.biomero/<name>.canonical.json`. That file is still read. The
+next write of the marker (indexing, trust upgrade or comparison refresh) puts
+it in the BIOMERO folder and removes only BIOMERO's own old file, and the
+`.biomero` folder only when it is then empty; if the old file cannot be removed
+a warning is logged and the new file stays authoritative. Reading never moves
+or deletes. An importer from before this change does not read the new location,
+so after a downgrade indexed inputs are treated as not indexed until they are
+indexed again; release the importer and biomero-scripts changes together.
+
+Back up the `.processed` folders together with the data they belong to; the
+sidecars live in their `.biomero` subfolders.
+
 ## Interrupted imports and recovery
 
 Recovery is automatic within an explicitly requested shallow lifecycle operation

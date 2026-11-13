@@ -278,6 +278,7 @@ def test_kept_full_receipt_refreshes_source_cache_without_repeating_comparison(
     assert [item.role for item in prepared.items] == ['primary', 'image-label']
     if cache_writable:
         assert load_canonical_marker(original).pixel_identity.instance_code == 'ISCC:ISOURCE'
+        assert (original.parent / '.biomero' / 'Image-1.ome.zarr.canonical.json').is_file()
     else:
         assert load_canonical_marker(original) is None
         assert 'continuing with the validated result' in caplog.text

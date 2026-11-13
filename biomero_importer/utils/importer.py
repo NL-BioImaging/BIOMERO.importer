@@ -38,6 +38,7 @@ from omero.plugins.sessions import SessionsControl
 from omero.model import DatasetI
 from omero.sys import Parameters
 
+from .canonical_store import PROCESSED_DATA_FOLDER  # single owner of the folder name
 from .ingest_tracker import log_ingestion_step, STAGE_PREPROCESSING
 from .shallow_settings import (
     DEFAULT_SHALLOW_ZARR,
@@ -57,10 +58,6 @@ PODMAN_RUN_RETRY_DELAY = 2  # Initial retry delay, doubled after each failure
 OMERO_KEEPALIVE_SECONDS = 60
 ANNOTATION_MAX_ATTEMPTS = 3
 TMP_OUTPUT_FOLDER = "OMERO_inplace"
-PROCESSED_DATA_FOLDER = os.getenv(
-    "PROCESSED_DATA_FOLDER",
-    ".processed",
-)
 SHALLOW_ZARR_ENABLED = env_flag_enabled(ENV_SHALLOW_ZARR, DEFAULT_SHALLOW_ZARR)
 
 # A CIFS/DFS referral reconnect can make Podman's first bind-source statfs fail
