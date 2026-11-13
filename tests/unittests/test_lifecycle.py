@@ -24,8 +24,13 @@ from uuid import UUID
 import pytest
 
 from biomero_schema.imports import (
+    IMPORT_STORAGE_FILENAME,
+    ImporterFullImportStorageRecord,
+    ImporterShallowImportStorageRecord,
     ImportOptionsEnvelope,
+    RemoteImportStorageRecord,
     ShallowZarrImportOperation,
+    parse_import_storage_record,
 )
 from biomero_schema.zarr import (
     TRANSFER_INPUT_MARKER,
@@ -42,7 +47,11 @@ from biomero_schema.zarr import (
     ZarrLabelComponent,
 )
 
-from biomero_importer.utils.lifecycle import ImportLifecycleEngine, _prune_committed
+from biomero_importer.utils.lifecycle import (
+    ImportLifecycleEngine,
+    _prune_committed,
+    write_import_storage_record,
+)
 from biomero_importer.utils.importer import DataPackageImporter
 from biomero_importer.utils.pixel_identity import PixelIdentityError
 from biomero_importer.utils.result_zarr import (
@@ -834,27 +843,41 @@ def test_shared_flag_parser_is_used_by_importer_module(monkeypatch):
         importlib.reload(importer_module)
 
 
-def _record(**fields):
-    from biomero_importer.utils.lifecycle import ImportStorageRecord
-    return ImportStorageRecord(workflow_id="wf", **fields)
+IMPORT_STORAGE_WORKFLOW = "12345678-1234-5678-1234-567812345678"
 
 
 @pytest.mark.parametrize("record, expected", [
-    (_record(storage="shallow-zarr", location="remote", decision_basis="matched",
-             container="helper:1", tool_version="1.0", task_id="t", job_id=None,
-             report_sha256="abc"),
-     '{"schema": 1, "workflow_id": "wf", "storage": "shallow-zarr", '
-     '"location": "remote", "decision_basis": "matched", "container": "helper:1", '
-     '"tool_version": "1.0", "task_id": "t", "job_id": null, "report_sha256": "abc"}'),
-    (_record(storage="shallow-zarr", location="importer", tool_version="1.0",
-             decision_basis="matched"),
-     '{"schema": 1, "workflow_id": "wf", "storage": "shallow-zarr", '
-     '"location": "importer", "tool_version": "1.0", "decision_basis": "matched"}'),
-    (_record(storage="full-zarr", location="importer", tool_version="1.0",
-             reason="pixels-differ"),
-     '{"schema": 1, "workflow_id": "wf", "storage": "full-zarr", '
-     '"location": "importer", "tool_version": "1.0", "reason": "pixels-differ"}'),
-])
-def test_import_storage_record_keeps_its_persisted_format(record, expected):
-    # Other BIOMERO components read this file: pin field set, null and order.
-    assert json.dumps(record.to_dict()) == expected
+    (RemoteImportStorageRecord(
+        schema=1, workflow_id=IMPORT_STORAGE_WORKFLOW, storage="shallow-zarr",
+        decision_basis=None, container="helper:1", tool_version="1.0",
+        task_id="t", job_id=None, report_sha256="abc"),
+     '{\n  "container": "helper:1",\n  "decision_basis": null,\n'
+     '  "job_id": null,\n  "location": "remote",\n'
+     '  "report_sha256": "abc",\n  "schema": 1,\n'
+     '  "storage": "shallow-zarr",\n  "task_id": "t",\n'
+     '  "tool_version": "1.0",\n'
+     '  "workflow_id": "12345678-1234-5678-1234-567812345678"\n}'),
+    (ImporterShallowImportStorageRecord(
+        schema=1, workflow_id=IMPORT_STORAGE_WORKFLOW, tool_version="1.0",
+        decision_basis="matched"),
+     '{\n  "decision_basis": "matched",\n  "location": "importer",\n'
+     '  "schema": 1,\n  "storage": "shallow-zarr",\n'
+     '  "tool_version": "1.0",\n'
+     '  "workflow_id": "12345678-1234-5678-1234-567812345678"\n}'),
+    (ImporterFullImportStorageRecord(
+        schema=1, workflow_id=IMPORT_STORAGE_WORKFLOW, tool_version="1.0",
+        reason="pixels-differ"),
+     '{\n  "location": "importer",\n  "reason": "pixels-differ",\n'
+     '  "schema": 1,\n  "storage": "full-zarr",\n'
+     '  "tool_version": "1.0",\n'
+     '  "workflow_id": "12345678-1234-5678-1234-567812345678"\n}'),
+], ids=["remote", "importer-shallow", "importer-full"])
+def test_import_storage_record_file_keeps_its_persisted_bytes(
+        tmp_path, record, expected):
+    # Other BIOMERO components read this file: pin field set, null and bytes
+    # as written by importer betas 6 to 13.
+    write_import_storage_record(tmp_path, record)
+
+    written = (tmp_path / IMPORT_STORAGE_FILENAME).read_text(encoding="utf-8")
+    assert written == expected
+    assert parse_import_storage_record(json.loads(written)) == record

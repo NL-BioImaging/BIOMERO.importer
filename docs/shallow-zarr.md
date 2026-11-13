@@ -138,6 +138,10 @@ another pixel copy.
 | Created by BIOMERO (inside a `.processed` folder) | `.biomero-canonical.json` inside the Zarr |
 | Existing user Zarr indexed in place | `<zarr parent>/.processed/.biomero/<zarr name>.canonical.json` |
 
+The marker format (`markerSchema`, `state`, `source`) and the name
+`.biomero-canonical.json` are defined by the `CanonicalMarker` model and constants in
+biomero-schema; the importer reads and writes the marker only through them.
+
 For example, indexing `/data/groupA/project/cells.ome.zarr` in place writes
 `/data/groupA/project/.processed/.biomero/cells.ome.zarr.canonical.json`. This
 is the same per-directory `.processed` folder BIOMERO already uses for its

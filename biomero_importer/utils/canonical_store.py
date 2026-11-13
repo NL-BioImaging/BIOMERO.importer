@@ -26,13 +26,24 @@ import shutil
 import tempfile
 from typing import Any, Iterator, Mapping, Optional, Union
 
-from biomero_schema.zarr import CanonicalPlateSource, CanonicalZarrSource
+from pydantic import TypeAdapter, ValidationError
+
+# CANONICAL_MARKER_NAME and CANONICAL_MARKER_SCHEMA are defined once in
+# biomero-schema. They stay importable from this module because
+# biomero-scripts import them from here.
+from biomero_schema.zarr import (
+    CANONICAL_MARKER_COMMITTED,
+    CANONICAL_MARKER_NAME,
+    CANONICAL_MARKER_SCHEMA,
+    CanonicalMarker,
+    CanonicalMarkerSource,
+    CanonicalPlateSource,
+    CanonicalZarrSource,
+)
 
 logger = logging.getLogger(__name__)
 
 
-CANONICAL_MARKER_NAME = ".biomero-canonical.json"
-CANONICAL_MARKER_SCHEMA = 1
 CANONICAL_METADATA_DIRECTORY = ".biomero"
 CANONICAL_MARKER_SUFFIX = ".canonical.json"
 ENV_PROCESSED_DATA_FOLDER = "PROCESSED_DATA_FOLDER"
@@ -80,13 +91,56 @@ CanonicalSourceLike = Union[
 ]
 
 
+# Picks Image or Plate from the payload with the schema's own discriminator.
+_CANONICAL_SOURCE_ADAPTER = TypeAdapter(CanonicalMarkerSource)
+
+
+def _canonical_source(
+    source: CanonicalSourceLike,
+) -> Union[CanonicalZarrSource, CanonicalPlateSource]:
+    """Return the source as its schema model, validating a mapping."""
+    return _CANONICAL_SOURCE_ADAPTER.validate_python(source)
+
+
 def _source_payload(source: CanonicalSourceLike) -> dict[str, Any]:
     """Return the shared schema's stable wire representation."""
-    if isinstance(source, (CanonicalZarrSource, CanonicalPlateSource)):
-        return source.to_dict()
-    if "images" in source and "sourceObjectType" not in source:
-        return CanonicalPlateSource.from_dict(source).to_dict()
-    return CanonicalZarrSource.from_dict(source).to_dict()
+    return _canonical_source(source).to_dict()
+
+
+def _committed_marker(source: CanonicalSourceLike) -> dict[str, Any]:
+    """Return the wire form of a committed marker for a canonical source."""
+    return CanonicalMarker(
+        marker_schema=CANONICAL_MARKER_SCHEMA,
+        state=CANONICAL_MARKER_COMMITTED,
+        source=_canonical_source(source),
+    ).to_dict()
+
+
+def _read_committed_marker(marker_path: Path) -> CanonicalMarker:
+    """Read a marker file and validate it as a committed canonical marker.
+
+    Args:
+        marker_path (Path): The internal marker or sidecar file.
+
+    Returns:
+        CanonicalMarker: The validated marker.
+
+    Raises:
+        InvalidCanonicalStore: If the file is unreadable, is not JSON, or is
+            not a committed marker of a supported schema version.
+    """
+    try:
+        raw_marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InvalidCanonicalStore(
+            f"Canonical marker is unreadable: {marker_path}"
+        ) from exc
+    try:
+        return CanonicalMarker.from_dict(raw_marker)
+    except ValidationError as exc:
+        raise InvalidCanonicalStore(
+            f"Canonical marker is not committed: {marker_path}"
+        ) from exc
 
 
 class InvalidCanonicalStore(RuntimeError):
@@ -193,20 +247,8 @@ class CanonicalStore:
             raise InvalidCanonicalStore(
                 f"Canonical store has no committed marker: {destination}"
             )
-        try:
-            marker = json.loads(marker_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise InvalidCanonicalStore(
-                f"Canonical marker is unreadable: {marker_path}"
-            ) from exc
-        if (
-            marker.get("markerSchema") != CANONICAL_MARKER_SCHEMA
-            or marker.get("state") != "committed"
-        ):
-            raise InvalidCanonicalStore(
-                f"Canonical marker is not committed: {marker_path}"
-            )
-        if _source_payload(marker.get("source", {})) != source_payload:
+        marker = _read_committed_marker(marker_path)
+        if marker.source.to_dict() != source_payload:
             raise InvalidCanonicalStore(
                 f"Canonical marker does not match requested source: {destination}"
             )
@@ -231,11 +273,7 @@ class CanonicalStore:
                 raise InvalidCanonicalStore(
                     f"Uncommitted canonical destination already exists: {destination}"
                 )
-            marker = {
-                "markerSchema": CANONICAL_MARKER_SCHEMA,
-                "state": "committed",
-                "source": _source_payload(source),
-            }
+            marker = _committed_marker(source)
             marker_tmp = staging_path / f"{CANONICAL_MARKER_NAME}.tmp"
             marker_path = staging_path / CANONICAL_MARKER_NAME
             marker_tmp.write_text(
@@ -369,24 +407,7 @@ def load_canonical_marker(
     marker_path = _find_canonical_marker_path(zarr_path, processed_folder)
     if marker_path is None:
         return None
-    try:
-        marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise InvalidCanonicalStore(
-            f"Canonical marker is unreadable: {marker_path}"
-        ) from exc
-    if (
-        marker.get("markerSchema") != CANONICAL_MARKER_SCHEMA
-        or marker.get("state") != "committed"
-        or not isinstance(marker.get("source"), dict)
-    ):
-        raise InvalidCanonicalStore(
-            f"Canonical marker is not committed: {marker_path}"
-        )
-    payload = marker["source"]
-    if "images" in payload and "sourceObjectType" not in payload:
-        return CanonicalPlateSource.from_dict(payload)
-    return CanonicalZarrSource.from_dict(payload)
+    return _read_committed_marker(marker_path).source
 
 
 def _find_canonical_marker_path(
@@ -470,12 +491,7 @@ def write_indexed_canonical_marker(
         marker_path = external_canonical_marker_path(
             zarr_path, processed_folder)
         logger.info(f"Writing canonical sidecar {marker_path} for {zarr_path}")
-    marker = {
-        "markerSchema": CANONICAL_MARKER_SCHEMA,
-        "state": "committed",
-        "source": _source_payload(source),
-    }
-    _write_marker_file(marker_path, marker)
+    _write_marker_file(marker_path, _committed_marker(source))
     if marker_path != internal:
         # Only after the new file is safely in place, so a failed write
         # leaves the old sidecar readable.
