@@ -277,10 +277,9 @@ def test_kept_full_receipt_refreshes_source_cache_without_repeating_comparison(
         prepared = ImportLifecycleEngine().prepare([root], options)
     assert [item.role for item in prepared.items] == ['primary', 'image-label']
     if cache_writable:
-        assert load_canonical_marker(original, {'group-0-data': tmp_path}).pixel_identity.instance_code == 'ISCC:ISOURCE'
-        assert (tmp_path / '.processed/.biomero/group-0-data/.processed/Image-1.ome.zarr.canonical.json').is_file()
-        assert not (original.parent / '.biomero' / 'Image-1.ome.zarr.canonical.json').exists()
+        assert load_canonical_marker(original).pixel_identity.instance_code == 'ISCC:ISOURCE'
+        assert (original.parent / '.biomero' / 'Image-1.ome.zarr.canonical.json').is_file()
     else:
-        assert load_canonical_marker(original, {'group-0-data': tmp_path}) is None
+        assert load_canonical_marker(original) is None
         assert 'continuing with the validated result' in caplog.text
     assert (root / '0/0.0.0.0').exists()

@@ -1,7 +1,9 @@
 """Processed output paths follow the container environment at startup."""
 
+import importlib
 import importlib.util
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,13 @@ def test_processed_paths_follow_environment(
     else:
         monkeypatch.setenv("PROCESSED_DATA_FOLDER", configured)
 
+    # The importer takes the folder name from canonical_store, which reads the
+    # environment once at import: load a fresh copy for this environment.
+    utils_package = importlib.import_module("biomero_importer.utils")
+    original = importlib.import_module("biomero_importer.utils.canonical_store")
+    monkeypatch.delitem(sys.modules, "biomero_importer.utils.canonical_store")
+    # Restore the package attribute too, so other tests keep the original.
+    monkeypatch.setattr(utils_package, "canonical_store", original)
     importer = load_module("importer")
     canonical_store = load_module("canonical_store")
     processor = importer.DataProcessor({

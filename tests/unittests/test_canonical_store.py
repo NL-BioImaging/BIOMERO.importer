@@ -167,52 +167,69 @@ def test_atomically_promotes_zarr_with_committed_marker(
     assert marker["source"] == source_record
 
 
-def storage_roots_for(tmp_path):
-    return {"import-mount-data": tmp_path, "group-5-data": tmp_path / "group5"}
+def sidecar_for(native):
+    return native.parent / ".processed" / ".biomero" / f"{native.name}.canonical.json"
 
 
 def test_indexes_native_zarr_with_sidecar_in_biomero_folder(
     tmp_path, source_record
 ):
-    native = tmp_path / "group5" / "project" / "incoming.ome.zarr"
+    native = tmp_path / "project" / "incoming.ome.zarr"
     make_zarr_v2(native)
-    roots = storage_roots_for(tmp_path)
 
-    marker_path = write_indexed_canonical_marker(native, source_record, roots)
+    marker_path = write_indexed_canonical_marker(native, source_record)
 
     assert marker_path == (
-        tmp_path / "group5" / ".processed" / ".biomero" / "group-5-data"
-        / "project" / "incoming.ome.zarr.canonical.json"
+        tmp_path / "project" / ".processed" / ".biomero"
+        / "incoming.ome.zarr.canonical.json"
     )
-    assert marker_path == external_canonical_marker_path(native, roots)
-    # Nothing is written into the user's folders.
+    assert marker_path == external_canonical_marker_path(native)
+    # Nothing is written into the user's folder except the BIOMERO folder.
     assert not (native / CANONICAL_MARKER_NAME).exists()
     assert not (native.parent / ".biomero").exists()
-    assert sorted(p.name for p in native.parent.iterdir()) == [native.name]
-    assert load_canonical_marker(native, roots) == CanonicalZarrSource.from_dict(
+    assert sorted(p.name for p in native.parent.iterdir()) == [
+        ".processed", native.name]
+    assert load_canonical_marker(native) == CanonicalZarrSource.from_dict(
         source_record
     )
 
 
-def test_sidecar_uses_mount_root_when_no_group_root_contains_zarr(tmp_path):
-    native = tmp_path / "other" / "x.ome.zarr"
-    roots = storage_roots_for(tmp_path)
+def test_sidecar_location_honours_processed_folder_name(tmp_path):
+    native = tmp_path / "x.ome.zarr"
 
-    assert external_canonical_marker_path(native, roots) == (
-        tmp_path / ".processed" / ".biomero" / "import-mount-data"
-        / "other" / "x.ome.zarr.canonical.json"
-    )
+    assert external_canonical_marker_path(native, ".custom") == (
+        tmp_path / ".custom" / ".biomero" / "x.ome.zarr.canonical.json")
 
 
-def test_sidecar_outside_managed_storage_is_refused(tmp_path, source_record):
-    managed = tmp_path / "managed"
-    native = tmp_path / "elsewhere" / "x.ome.zarr"
+def test_sidecar_for_zarr_inside_biomero_folder_does_not_nest(tmp_path):
+    native = tmp_path / ".processed" / "Image-1.ome.zarr"
+
+    assert external_canonical_marker_path(native) == (
+        tmp_path / ".processed" / ".biomero" / "Image-1.ome.zarr.canonical.json")
+
+
+def test_sidecar_path_refuses_path_without_name():
+    root = Path(Path.cwd().anchor)
+
+    with pytest.raises(ValueError, match="no name"):
+        external_canonical_marker_path(root)
+    with pytest.raises(ValueError, match="no name"):
+        canonical_store.legacy_canonical_marker_path(root)
+
+
+def test_unwritable_biomero_folder_raises_oserror_and_creates_nothing_else(
+    tmp_path, source_record
+):
+    native = tmp_path / "incoming.ome.zarr"
     make_zarr_v2(native)
+    # A file where the BIOMERO folder should be: mkdir fails on every platform.
+    (tmp_path / ".processed").write_text("not a folder")
 
-    with pytest.raises(ValueError, match="outside BIOMERO managed storage"):
-        write_indexed_canonical_marker(
-            native, source_record, {"import-mount-data": managed})
-    assert not (tmp_path / "elsewhere" / ".biomero").exists()
+    with pytest.raises(OSError):
+        write_indexed_canonical_marker(native, source_record)
+
+    assert (tmp_path / ".processed").read_text() == "not a folder"
+    assert load_canonical_marker(native) is None
 
 
 def write_legacy_sidecar(native, source_record):
@@ -230,11 +247,25 @@ def test_reads_legacy_sidecar_next_to_input_without_touching_it(
     native = tmp_path / "incoming.ome.zarr"
     make_zarr_v2(native)
     legacy = write_legacy_sidecar(native, source_record)
-    roots = storage_roots_for(tmp_path)
 
-    assert load_canonical_marker(native, roots) == CanonicalZarrSource.from_dict(
+    assert load_canonical_marker(native) == CanonicalZarrSource.from_dict(
         source_record)
     assert legacy.is_file()
+    assert not (tmp_path / ".processed").exists()
+
+
+def test_new_sidecar_wins_over_legacy_when_both_exist(tmp_path, source_record):
+    native = tmp_path / "incoming.ome.zarr"
+    make_zarr_v2(native)
+    write_legacy_sidecar(native, {**source_record, "sourceObjectId": 1})
+    sidecar = sidecar_for(native)
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text(json.dumps({
+        "markerSchema": 1, "state": "committed",
+        "source": {**source_record, "sourceObjectId": 2},
+    }), encoding="utf-8")
+
+    assert load_canonical_marker(native).source_object_id == 2
 
 
 def test_write_moves_legacy_sidecar_and_removes_empty_biomero_folder(
@@ -243,15 +274,14 @@ def test_write_moves_legacy_sidecar_and_removes_empty_biomero_folder(
     native = tmp_path / "incoming.ome.zarr"
     make_zarr_v2(native)
     legacy = write_legacy_sidecar(native, source_record)
-    roots = storage_roots_for(tmp_path)
 
-    marker_path = write_indexed_canonical_marker(native, source_record, roots)
+    marker_path = write_indexed_canonical_marker(native, source_record)
 
+    assert marker_path == sidecar_for(native)
     assert marker_path.is_file()
-    assert marker_path != legacy
     assert not legacy.exists()
     assert not legacy.parent.exists()
-    assert load_canonical_marker(native, roots) == CanonicalZarrSource.from_dict(
+    assert load_canonical_marker(native) == CanonicalZarrSource.from_dict(
         source_record)
 
 
@@ -266,12 +296,79 @@ def test_write_keeps_foreign_files_in_legacy_biomero_folder(
     other = legacy.parent / "other.ome.zarr.canonical.json"
     other.write_text("{}")
 
-    write_indexed_canonical_marker(
-        native, source_record, storage_roots_for(tmp_path))
+    write_indexed_canonical_marker(native, source_record)
 
     assert not legacy.exists()
     assert foreign.read_text() == "user file"
     assert other.is_file()
+
+
+def test_failed_write_leaves_legacy_sidecar_in_place_and_readable(
+    tmp_path, source_record, monkeypatch
+):
+    native = tmp_path / "incoming.ome.zarr"
+    make_zarr_v2(native)
+    legacy = write_legacy_sidecar(native, source_record)
+
+    def deny_replace(*_args):
+        raise PermissionError(13, "read-only")
+
+    monkeypatch.setattr(canonical_store.os, "replace", deny_replace)
+
+    with pytest.raises(PermissionError):
+        write_indexed_canonical_marker(native, source_record)
+
+    assert legacy.is_file()
+    assert not sidecar_for(native).exists()
+    assert not list(sidecar_for(native).parent.glob("*.tmp"))
+    assert load_canonical_marker(native) == CanonicalZarrSource.from_dict(
+        source_record)
+
+
+def test_legacy_removal_failure_is_a_warning_and_new_sidecar_stays(
+    tmp_path, source_record, monkeypatch, caplog
+):
+    native = tmp_path / "incoming.ome.zarr"
+    make_zarr_v2(native)
+    legacy = write_legacy_sidecar(native, source_record)
+    original_unlink = Path.unlink
+
+    def deny_legacy(path, *args, **kwargs):
+        if path == legacy:
+            raise PermissionError(13, "Permission denied", str(path))
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", deny_legacy)
+
+    with caplog.at_level("WARNING"):
+        marker_path = write_indexed_canonical_marker(native, source_record)
+
+    assert marker_path.is_file()
+    assert legacy.is_file()
+    assert "Could not remove canonical sidecar" in caplog.text
+    assert load_canonical_marker(native) == CanonicalZarrSource.from_dict(
+        source_record)
+
+
+def test_zarr_inside_biomero_folder_keeps_its_sidecar_after_write(
+    tmp_path, source_record
+):
+    # Legacy and current location coincide for a Zarr inside .processed.
+    native = tmp_path / ".processed" / "Image-1.ome.zarr"
+    make_zarr_v2(native)
+
+    marker_path = write_indexed_canonical_marker(native, source_record)
+
+    assert marker_path.is_file()
+    assert load_canonical_marker(native) == CanonicalZarrSource.from_dict(
+        source_record)
+
+
+def test_legacy_removal_tolerates_file_already_gone(tmp_path):
+    native = tmp_path / "incoming.ome.zarr"
+    make_zarr_v2(native)
+
+    assert canonical_store.remove_legacy_canonical_marker(native) is False
 
 
 def test_write_keeps_updating_internal_marker_in_place(tmp_path, source_record):
@@ -280,32 +377,63 @@ def test_write_keeps_updating_internal_marker_in_place(tmp_path, source_record):
     make_zarr_v2(staging)
     committed = store.commit(staging, source_record)
 
-    marker_path = write_indexed_canonical_marker(
-        committed, source_record, storage_roots_for(tmp_path))
+    marker_path = write_indexed_canonical_marker(committed, source_record)
 
     assert marker_path == committed / CANONICAL_MARKER_NAME
-    assert not (tmp_path / ".processed" / ".biomero").exists()
+    assert not (committed.parent / ".biomero").exists()
 
 
 def test_move_canonical_marker_follows_renamed_zarr_from_both_locations(
     tmp_path, source_record
 ):
-    roots = storage_roots_for(tmp_path)
     moved_new = tmp_path / "new.ome.zarr"
     moved_legacy = tmp_path / "legacy.ome.zarr"
     for name in (moved_new, moved_legacy):
         make_zarr_v2(name)
-    write_indexed_canonical_marker(moved_new, source_record, roots)
+    write_indexed_canonical_marker(moved_new, source_record)
     legacy = write_legacy_sidecar(moved_legacy, source_record)
 
-    for old, new in ((moved_new, tmp_path / "a.ome.zarr"),
+    for old, new in ((moved_new, tmp_path / "sub" / "a.ome.zarr"),
                      (moved_legacy, tmp_path / "b.ome.zarr")):
+        new.parent.mkdir(exist_ok=True)
         old.rename(new)
-        target = canonical_store.move_canonical_marker(old, new, roots)
-        assert target == external_canonical_marker_path(new, roots)
+        target = canonical_store.move_canonical_marker(old, new)
+        assert target == external_canonical_marker_path(new)
         assert target.is_file()
-        assert not external_canonical_marker_path(old, roots).exists()
+        assert not external_canonical_marker_path(old).exists()
     assert not legacy.parent.exists()
+
+
+def test_move_canonical_marker_never_overwrites_destination_sidecar(
+    tmp_path, source_record
+):
+    old = tmp_path / "old.ome.zarr"
+    new = tmp_path / "new.ome.zarr"
+    for zarr in (old, new):
+        make_zarr_v2(zarr)
+        write_indexed_canonical_marker(zarr, source_record)
+    destination = external_canonical_marker_path(new)
+    destination.write_text("destination wins")
+
+    assert canonical_store.move_canonical_marker(old, new) is None
+
+    assert destination.read_text() == "destination wins"
+    assert external_canonical_marker_path(old).is_file()
+
+
+def test_remove_external_markers_removes_both_and_empty_folders(
+    tmp_path, source_record
+):
+    native = tmp_path / "gone.ome.zarr"
+    make_zarr_v2(native)
+    write_indexed_canonical_marker(native, source_record)
+    legacy = write_legacy_sidecar(native, source_record)
+
+    canonical_store.remove_external_canonical_markers(native)
+
+    assert not legacy.parent.exists()
+    assert not sidecar_for(native).parent.exists()
+    assert (tmp_path / ".processed").is_dir()
 
 
 def test_adopts_legacy_marker_without_new_optional_comparison_fields(tmp_path, source_record):
@@ -348,10 +476,9 @@ def test_external_marker_round_trips_plate_identity_inventory(
         ),),
     )
 
-    roots = storage_roots_for(tmp_path)
-    write_indexed_canonical_marker(native, plate, roots)
+    write_indexed_canonical_marker(native, plate)
 
-    assert load_canonical_marker(native, roots) == plate
+    assert load_canonical_marker(native) == plate
 
 
 def test_promotes_across_filesystems_via_destination_staging(
