@@ -29,9 +29,9 @@ def test_refresh_replaces_existing_internal_marker_and_keeps_pixels(tmp_path):
     refreshed = item.model_copy(update={"source": source.model_copy(update={"pixel_identity": current})})
 
     assert canonical_store.cache_refreshed_inputs(expected, (refreshed,), {"data": tmp_path}) == 1
-    assert canonical_store.load_canonical_marker(root).pixel_identity == current
+    assert canonical_store.load_canonical_marker(root, {"data": tmp_path}).pixel_identity == current
     assert pixels.read_bytes() == b"unchanged"
-    assert not canonical_store.external_canonical_marker_path(root).exists()
+    assert not canonical_store.external_canonical_marker_path(root, {"data": tmp_path}).exists()
 
     changed = refreshed.model_copy(update={"source": refreshed.source.model_copy(update={"source_generation": 3})})
     with pytest.raises(ValueError, match="source binding"):

@@ -127,6 +127,35 @@ Canonical storage must remain available through the configured shared mounts
 and storage mappings. Deleting or moving the canonical arrays breaks results
 that reference them. See [storage and preprocessing](storage.md).
 
+## Canonical source metadata
+
+Indexing a canonical source records its detailed identities (pixel identity,
+plate image and label inventory) in a canonical marker. This is metadata, not
+another pixel copy.
+
+| Zarr | Marker |
+| --- | --- |
+| Created by BIOMERO (inside a `.processed` folder) | `.biomero-canonical.json` inside the Zarr |
+| Existing user Zarr indexed in place | `<storage root>/.processed/.biomero/<storage id>/<relative path>.canonical.json` |
+
+For example, `/data/groupA/project/cells.ome.zarr`, indexed in place under
+storage `group-5-data` with root `/data/groupA`, has its marker at
+`/data/groupA/.processed/.biomero/group-5-data/project/cells.ome.zarr.canonical.json`.
+
+BIOMERO writes only into its own folders (`.processed`, `.analyzed`); users
+agree not to touch them, and BIOMERO never writes into user folders, because
+users may move or delete their data at any time. The storage root is the most
+specific managed root containing the Zarr (a group's data folder, otherwise
+`IMPORT_MOUNT_PATH`). `external_canonical_marker_path` in
+`biomero_importer/utils/canonical_store.py` is the single owner of this
+location; other components call it. Back up `.processed/.biomero` with the data.
+
+Earlier betas wrote the marker next to the input, in
+`<input parent>/.biomero/<name>.canonical.json`. That file is still read. The
+next write of the marker (indexing, trust upgrade or comparison refresh) puts
+it in the BIOMERO folder and removes only BIOMERO's own old file, and the
+`.biomero` folder only when it is then empty. Reading never moves or deletes.
+
 ## Interrupted imports and recovery
 
 Recovery is automatic within an explicitly requested shallow lifecycle operation

@@ -1,3 +1,19 @@
+# -*- coding: utf-8 -*-
+# Copyright (C) 2026 Torec Luik
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 """Transactional storage primitives for canonical BIOMERO Zarrs."""
 
 from contextlib import contextmanager
@@ -8,14 +24,18 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Any, Iterator, Mapping, Optional, Union
+from typing import Any, Iterator, Mapping, NamedTuple, Optional, Union
 
 from biomero_schema.zarr import CanonicalPlateSource, CanonicalZarrSource
+from biomero_shallower.result_zarr import load_managed_storage_roots
+
+logger = logging.getLogger(__name__)
 
 
 CANONICAL_MARKER_NAME = ".biomero-canonical.json"
 CANONICAL_MARKER_SCHEMA = 1
 CANONICAL_METADATA_DIRECTORY = ".biomero"
+CANONICAL_MARKER_SUFFIX = ".canonical.json"
 PROCESSED_DATA_FOLDER = os.getenv(
     "PROCESSED_DATA_FOLDER",
     ".processed",
@@ -34,6 +54,14 @@ def _source_payload(source: CanonicalSourceLike) -> dict[str, Any]:
     if "images" in source and "sourceObjectType" not in source:
         return CanonicalPlateSource.from_dict(source).to_dict()
     return CanonicalZarrSource.from_dict(source).to_dict()
+
+
+class ManagedZarrLocation(NamedTuple):
+    """Where a Zarr sits within BIOMERO managed storage."""
+
+    storage_id: str
+    root: Path
+    relative_path: Path
 
 
 class InvalidCanonicalStore(RuntimeError):
@@ -241,25 +269,238 @@ class CanonicalStore:
         )
 
 
-def external_canonical_marker_path(zarr_path: Union[str, Path]) -> Path:
-    """Return the managed sidecar path without writing into source pixels."""
+def locate_managed_zarr(
+    zarr_path: Union[str, Path],
+    storage_roots: Mapping[str, Union[str, Path]],
+) -> ManagedZarrLocation:
+    """Find the most specific managed storage root that contains a Zarr.
+
+    A group root beneath the mount-wide root wins, because it is the deepest.
+    This mirrors how the transfer script records ``storageRoot`` for a Zarr
+    that is indexed in place.
+
+    Args:
+        zarr_path (Union[str, Path]): Zarr directory to locate.
+        storage_roots (Mapping[str, Union[str, Path]]): Storage id to root
+            directory, as returned by ``load_managed_storage_roots``.
+
+    Returns:
+        ManagedZarrLocation: Storage id, root and path relative to the root.
+
+    Raises:
+        ValueError: If the Zarr is outside every managed storage root.
+    """
+    resolved_path = Path(zarr_path).resolve()
+    candidates = []
+    for storage_id, root in storage_roots.items():
+        resolved_root = Path(root).resolve()
+        try:
+            relative_path = resolved_path.relative_to(resolved_root)
+        except ValueError:
+            continue
+        candidates.append(ManagedZarrLocation(
+            storage_id, resolved_root, relative_path))
+    if not candidates:
+        raise ValueError(
+            f"Zarr is outside BIOMERO managed storage: {resolved_path}"
+        )
+    return max(candidates, key=lambda candidate: len(candidate.root.parts))
+
+
+def external_canonical_marker_path(
+    zarr_path: Union[str, Path],
+    storage_roots: Optional[Mapping[str, Union[str, Path]]] = None,
+    processed_folder: str = PROCESSED_DATA_FOLDER,
+) -> Path:
+    """Return where BIOMERO stores the sidecar of a Zarr it indexes in place.
+
+    The sidecar lives in the BIOMERO folder of the managed storage root that
+    contains the Zarr, never next to the (user-owned) input:
+    ``<root>/.processed/.biomero/<storage id>/<relative path>.canonical.json``.
+    This is the single owner of that location. Users may move or delete their
+    own data at any time, so nothing is written into their folders.
+
+    Args:
+        zarr_path (Union[str, Path]): Indexed Zarr directory.
+        storage_roots (Optional[Mapping[str, Union[str, Path]]]): Storage id
+            to root directory. Defaults to ``load_managed_storage_roots()``.
+        processed_folder (str): Name of the BIOMERO folder in each root.
+
+    Returns:
+        Path: Sidecar location (not necessarily existing).
+
+    Raises:
+        ValueError: If the Zarr is outside every managed storage root.
+    """
+    if storage_roots is None:
+        storage_roots = load_managed_storage_roots()
+    location = locate_managed_zarr(zarr_path, storage_roots)
+    relative_marker = location.relative_path.with_name(
+        f"{location.relative_path.name}{CANONICAL_MARKER_SUFFIX}")
+    return (
+        location.root
+        / processed_folder
+        / CANONICAL_METADATA_DIRECTORY
+        / location.storage_id
+        / relative_marker
+    )
+
+
+def legacy_canonical_marker_path(zarr_path: Union[str, Path]) -> Path:
+    """Return the beta location next to the input: ``<parent>/.biomero/``.
+
+    Kept only to read and migrate sidecars written by earlier betas.
+    BIOMERO no longer writes here.
+    """
     zarr_path = Path(zarr_path)
     return (
         zarr_path.parent
         / CANONICAL_METADATA_DIRECTORY
-        / f"{zarr_path.name}.canonical.json"
+        / f"{zarr_path.name}{CANONICAL_MARKER_SUFFIX}"
     )
+
+
+def find_canonical_marker_path(
+    zarr_path: Union[str, Path],
+    storage_roots: Optional[Mapping[str, Union[str, Path]]] = None,
+) -> Optional[Path]:
+    """Return the existing marker of a Zarr, or None when it has none.
+
+    Lookup order: internal marker, BIOMERO-folder sidecar, legacy sidecar
+    next to the input (read-only fallback for beta installs).
+    """
+    zarr_path = Path(zarr_path).resolve()
+    internal = zarr_path / CANONICAL_MARKER_NAME
+    if internal.is_file():
+        logger.debug(f"Using internal canonical marker {internal}")
+        return internal
+    sidecar = _sidecar_path_or_none(zarr_path, storage_roots)
+    if sidecar is not None and sidecar.is_file():
+        logger.debug(f"Using canonical sidecar {sidecar}")
+        return sidecar
+    legacy = legacy_canonical_marker_path(zarr_path)
+    if legacy.is_file():
+        logger.debug(
+            f"Using legacy canonical sidecar {legacy}; it moves to the "
+            f"BIOMERO folder on the next write")
+        return legacy
+    logger.debug(f"No canonical marker found for {zarr_path}")
+    return None
+
+
+def remove_legacy_canonical_marker(zarr_path: Union[str, Path]) -> bool:
+    """Remove BIOMERO's own old sidecar and its folder if that is now empty.
+
+    Only the exact ``<name>.canonical.json`` file is removed; the ``.biomero``
+    folder is removed only when empty, so anything else in it is left alone.
+
+    Returns:
+        bool: True if a legacy sidecar was removed.
+    """
+    legacy = legacy_canonical_marker_path(zarr_path)
+    if not legacy.is_file():
+        logger.debug(f"No legacy canonical sidecar to remove at {legacy}")
+        return False
+    legacy.unlink()
+    logger.info(f"Removed legacy canonical sidecar {legacy}")
+    _remove_folder_if_empty(legacy.parent)
+    return True
+
+
+def _remove_folder_if_empty(folder: Path) -> None:
+    """Remove a folder only when nothing else is in it (``rmdir`` semantics)."""
+    try:
+        folder.rmdir()
+    except OSError:
+        logger.debug(f"Kept {folder}: not empty or not removable")
+    else:
+        logger.info(f"Removed empty folder {folder}")
+
+
+def move_canonical_marker(
+    source_zarr: Union[str, Path],
+    destination_zarr: Union[str, Path],
+    storage_roots: Optional[Mapping[str, Union[str, Path]]] = None,
+) -> Optional[Path]:
+    """Move the sidecar of a Zarr that was renamed from source to destination.
+
+    The sidecar is keyed by the Zarr's location, so renaming the Zarr must
+    rename its sidecar. Call this after the Zarr itself has been moved. An
+    internal marker moves with the Zarr and needs no action.
+
+    Args:
+        source_zarr (Union[str, Path]): Former Zarr location.
+        destination_zarr (Union[str, Path]): New Zarr location.
+        storage_roots (Optional[Mapping[str, Union[str, Path]]]): Storage id
+            to root directory. Defaults to ``load_managed_storage_roots()``.
+
+    Returns:
+        Optional[Path]: The new sidecar location, or None when the source
+        had no sidecar.
+    """
+    source_zarr = Path(source_zarr).resolve()
+    destination_zarr = Path(destination_zarr).resolve()
+    legacy = legacy_canonical_marker_path(source_zarr)
+    candidates = (_sidecar_path_or_none(source_zarr, storage_roots), legacy)
+    old_marker = next(
+        (path for path in candidates if path is not None and path.is_file()),
+        None)
+    if old_marker is None:
+        logger.debug(f"No external canonical sidecar to move for {source_zarr}")
+        return None
+    new_marker = external_canonical_marker_path(destination_zarr, storage_roots)
+    new_marker.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(old_marker, new_marker)
+    logger.info(f"Moved canonical sidecar {old_marker} to {new_marker}")
+    if old_marker == legacy:
+        _remove_folder_if_empty(legacy.parent)
+    return new_marker
+
+
+def _sidecar_path_or_none(
+    zarr_path: Path,
+    storage_roots: Optional[Mapping[str, Union[str, Path]]],
+) -> Optional[Path]:
+    """Return the BIOMERO-folder sidecar path, or None outside managed storage."""
+    try:
+        return external_canonical_marker_path(zarr_path, storage_roots)
+    except ValueError as exc:
+        logger.debug(f"No BIOMERO-folder sidecar location for {zarr_path}: {exc}")
+        return None
 
 
 def write_indexed_canonical_marker(
     zarr_path: Union[str, Path],
     source: CanonicalSourceLike,
+    storage_roots: Optional[Mapping[str, Union[str, Path]]] = None,
 ) -> Path:
-    """Atomically persist detailed identities beside an indexed managed Zarr."""
+    """Atomically persist detailed identities of an indexed managed Zarr.
+
+    An internal marker (a Zarr BIOMERO created) is updated in place. For a Zarr
+    indexed in place, the sidecar is written to the BIOMERO folder, and a
+    sidecar left next to the input by an earlier beta is removed afterwards.
+
+    Args:
+        zarr_path (Union[str, Path]): Indexed Zarr directory.
+        source (CanonicalSourceLike): Identities to persist.
+        storage_roots (Optional[Mapping[str, Union[str, Path]]]): Storage id
+            to root directory. Defaults to ``load_managed_storage_roots()``.
+
+    Returns:
+        Path: The marker that was written.
+
+    Raises:
+        ValueError: If an in-place Zarr is outside every managed storage root.
+    """
     zarr_path = Path(zarr_path).resolve()
     CanonicalStore._validate_zarr(zarr_path)
     internal = zarr_path / CANONICAL_MARKER_NAME
-    marker_path = internal if internal.is_file() else external_canonical_marker_path(zarr_path)
+    if internal.is_file():
+        marker_path = internal
+        logger.debug(f"Updating internal canonical marker {internal}")
+    else:
+        marker_path = external_canonical_marker_path(zarr_path, storage_roots)
+        logger.info(f"Writing canonical sidecar {marker_path} for {zarr_path}")
     marker_path.parent.mkdir(parents=True, exist_ok=True)
     marker = {
         "markerSchema": CANONICAL_MARKER_SCHEMA,
@@ -280,19 +521,21 @@ def write_indexed_canonical_marker(
         os.replace(temporary_path, marker_path)
     finally:
         temporary_path.unlink(missing_ok=True)
+    if marker_path != internal:
+        remove_legacy_canonical_marker(zarr_path)
     return marker_path
 
 
 def load_canonical_marker(
     zarr_path: Union[str, Path],
+    storage_roots: Optional[Mapping[str, Union[str, Path]]] = None,
 ) -> Optional[Union[CanonicalZarrSource, CanonicalPlateSource]]:
-    """Load a committed internal or non-invasive external canonical marker."""
-    zarr_path = Path(zarr_path).resolve()
-    candidates = (
-        zarr_path / CANONICAL_MARKER_NAME,
-        external_canonical_marker_path(zarr_path),
-    )
-    marker_path = next((path for path in candidates if path.is_file()), None)
+    """Load a committed internal marker or an external sidecar of a Zarr.
+
+    Reads the internal marker, then the BIOMERO-folder sidecar, then the
+    legacy sidecar next to the input. Reading never moves or deletes files.
+    """
+    marker_path = find_canonical_marker_path(zarr_path, storage_roots)
     if marker_path is None:
         return None
     try:
@@ -369,7 +612,7 @@ def cache_refreshed_inputs(expected, refreshed_inputs, storage_roots):
                 image.model_copy(update={"source": current_sources[image.image_node_path]})
                 for image in previous.plate_source.images)})
         try:
-            write_indexed_canonical_marker(path, updated)
+            write_indexed_canonical_marker(path, updated, storage_roots)
         except OSError:
             logging.getLogger(__name__).warning(
                 "Could not persist optional comparison metadata for %s; "
