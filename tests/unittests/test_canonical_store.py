@@ -693,15 +693,14 @@ def lock_holder(tmp_path, source_record):
 
 
 def test_creation_lock_is_refused_while_another_process_holds_it(
-        tmp_path, source_record, lock_holder, caplog):
+        tmp_path, source_record, lock_holder):
     store = CanonicalStore(tmp_path)
 
-    with caplog.at_level(logging.INFO, logger=canonical_store.logger.name):
-        with pytest.raises(CanonicalCreationLocked):
-            with store.creation_lock(source_record):
-                pytest.fail("lock held by another process was acquired")
+    with pytest.raises(CanonicalCreationLocked) as excinfo:
+        with store.creation_lock(source_record):
+            pytest.fail("lock held by another process was acquired")
 
-    assert "held by another process" in caplog.text
+    assert "not waiting" in str(excinfo.value)
 
 
 def test_creation_lock_is_free_after_holder_released_it(
@@ -755,3 +754,54 @@ def test_commit_succeeds_with_legacy_lock_file(tmp_path, source_record):
     destination = CanonicalStore(tmp_path).commit(staging, source_record)
 
     assert (destination / CANONICAL_MARKER_NAME).is_file()
+
+
+def test_creation_lock_file_name_is_pinned(tmp_path, source_record):
+    with CanonicalStore(tmp_path).creation_lock(source_record):
+        pass
+
+    lock_file = (tmp_path / "project" / ".processed"
+                 / ".Image-3207.ome.zarr.biomero-lock")
+    assert lock_file.is_file()
+
+
+def test_commit_is_refused_while_another_process_holds_the_lock(
+        tmp_path, source_record, lock_holder):
+    staging = tmp_path / "staging.ome.zarr"
+    make_zarr_v2(staging)
+
+    with pytest.raises(CanonicalCreationLocked):
+        CanonicalStore(tmp_path).commit(staging, source_record)
+
+    assert (staging / ".zgroup").is_file()
+    assert not (staging / CANONICAL_MARKER_NAME).exists()
+    assert not (tmp_path / source_record["relativePath"]).exists()
+
+
+@pytest.mark.parametrize("error", [
+    OSError(errno.ENOLCK, "no locks available"),
+    OSError(errno.ENOSYS, "function not implemented"),
+    OSError(errno.EROFS, "read-only file system"),
+])
+def test_creation_lock_failure_that_is_not_busy_is_not_reported_as_busy(
+        tmp_path, source_record, monkeypatch, error):
+    def fail(destination):
+        raise error
+
+    monkeypatch.setattr(canonical_store, "locked", fail)
+
+    with pytest.raises(canonical_store.CanonicalCreationLockUnavailable,
+                       match=f"errno {error.errno}") as excinfo:
+        with CanonicalStore(tmp_path).creation_lock(source_record):
+            pytest.fail("lock should not be acquired")
+
+    assert not isinstance(excinfo.value, CanonicalCreationLocked)
+
+
+def test_oserror_in_the_body_is_not_taken_for_a_lock_failure(
+        tmp_path, source_record):
+    with pytest.raises(OSError, match="body failed") as excinfo:
+        with CanonicalStore(tmp_path).creation_lock(source_record):
+            raise OSError(errno.EIO, "body failed")
+
+    assert not isinstance(excinfo.value, RuntimeError)

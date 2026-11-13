@@ -103,6 +103,26 @@ class CanonicalCreationLocked(RuntimeError):
     """Another process is creating the same canonical Zarr."""
 
 
+class CanonicalCreationLockUnavailable(RuntimeError):
+    """The lock cannot be taken at all (read-only mount, no lock support).
+
+    Not the same as ``CanonicalCreationLocked``: nobody else holds the lock,
+    so waiting or retrying will not help.
+    """
+
+
+# msvcrt.locking reports a lock held by another process as EACCES (a
+# PermissionError) or EDEADLK; flock reports it as BlockingIOError.
+_WINDOWS_LOCK_BUSY_ERRNOS = (errno.EACCES, errno.EDEADLK)
+
+
+def _is_lock_busy(error: OSError) -> bool:
+    """Return whether a failed lock attempt means another process holds it."""
+    if isinstance(error, BlockingIOError):
+        return True
+    return os.name == "nt" and error.errno in _WINDOWS_LOCK_BUSY_ERRNOS
+
+
 class CanonicalStore:
     """Resolves and commits canonical Zarrs beneath one managed storage root."""
 
@@ -171,8 +191,11 @@ class CanonicalStore:
         taken through the shallower's ``locked``, so the operating system
         releases it when the holder exits, also after a crash or kill. The lock
         file that stays behind carries no state and never blocks a later
-        creation. A busy lock is not waited for: the holder is creating the
-        same Zarr, so the caller fails fast and can adopt its result later.
+        creation. The lock is taken where the canonical Zarr is created, which
+        is the OMERO script worker container (biomero-scripts call
+        ``commit``), not the importer container. A busy lock is not waited
+        for: the holder is creating the same Zarr, so the caller fails fast
+        and can adopt its result later.
 
         Args:
             source (CanonicalSourceLike): Canonical source to be created.
@@ -182,29 +205,39 @@ class CanonicalStore:
 
         Raises:
             CanonicalCreationLocked: If another process holds the lock.
+            CanonicalCreationLockUnavailable: If the lock cannot be taken for
+                another reason (permissions, unsupported file locks).
         """
         destination = self.destination_for(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
         self._ignore_legacy_creation_lock(destination)
-        with ExitStack() as stack:
-            logger.debug(f"Acquiring canonical creation lock for {destination}")
-            try:
-                stack.enter_context(locked(destination))
-            except OSError as exc:
-                # flock and msvcrt report a lock held by another process as
-                # an OSError (BlockingIOError or PermissionError).
-                logger.warning(
-                    f"Canonical creation lock for {destination} is held by "
-                    f"another process ({exc}); not waiting")
-                raise CanonicalCreationLocked(
-                    f"Canonical creation is already locked: {destination}"
-                ) from exc
-            logger.info(f"Acquired canonical creation lock for {destination}")
-            try:
-                yield destination
-            finally:
+        # ExitStack wraps the shallower's context manager so that taking the
+        # lock can fail on its own, apart from the caller's body, and so that
+        # "released" is logged after the lock is really released.
+        lock_stack = ExitStack()
+        logger.debug(f"Acquiring canonical creation lock for {destination}")
+        try:
+            lock_stack.enter_context(locked(destination))
+        except OSError as exc:
+            if _is_lock_busy(exc):
                 logger.debug(
-                    f"Releasing canonical creation lock for {destination}")
+                    f"Canonical creation lock for {destination} is busy")
+                raise CanonicalCreationLocked(
+                    f"Canonical creation is already locked by another "
+                    f"process, not waiting: {destination}"
+                ) from exc
+            raise CanonicalCreationLockUnavailable(
+                f"Cannot take the canonical creation lock for "
+                f"{destination} (errno {exc.errno}: {exc}); the storage "
+                f"may be read-only or lack file lock support"
+            ) from exc
+        logger.info(f"Acquired canonical creation lock for {destination}")
+        try:
+            yield destination
+        finally:
+            lock_stack.close()
+            logger.debug(
+                f"Released canonical creation lock for {destination}")
 
     @staticmethod
     def _ignore_legacy_creation_lock(destination: Path) -> None:
