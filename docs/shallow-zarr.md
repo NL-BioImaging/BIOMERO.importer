@@ -143,7 +143,10 @@ For example, indexing `/data/groupA/project/cells.ome.zarr` in place writes
 is the same per-directory `.processed` folder BIOMERO already uses for its
 other outputs, and the name comes from `PROCESSED_DATA_FOLDER` (default
 `.processed`). Set it identically wherever BIOMERO code runs (importer and
-OMERO script worker), because the location is derived from it.
+OMERO script worker), because the location is derived from it; the worker
+receives it through BIOMERO core's `slurm_env` settings. The value must be one
+folder name; an empty, absolute or multi-segment value is ignored with a
+warning and `.processed` is used.
 
 BIOMERO writes only into its own folders (`.processed`, `.analyzed`); users
 agree not to touch them, and BIOMERO never writes into user folders, because
@@ -158,7 +161,9 @@ written (permissions, read-only mount), BIOMERO logs a warning with the path
 and reason and does not index the input: the workflow continues and the input
 is used through the normal path (for an Image, no canonical registration is
 added; for a Plate, no detailed inventory is stored), without shallow result
-matching for that input. No pre-flight check is needed because nothing fails.
+matching for that input. A corrupt, uncommitted or unreachable sidecar is
+treated the same way: as absent, with a warning. Every sidecar problem degrades
+to the normal path, so no pre-flight write check is needed.
 
 Earlier betas wrote the marker next to the input, in
 `<input parent>/.biomero/<name>.canonical.json`. That file is still read. The

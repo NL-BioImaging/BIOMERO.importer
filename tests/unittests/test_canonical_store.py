@@ -364,6 +364,90 @@ def test_zarr_inside_biomero_folder_keeps_its_sidecar_after_write(
         source_record)
 
 
+def test_untraversable_biomero_folder_is_treated_as_no_sidecar(
+    tmp_path, source_record, monkeypatch, caplog
+):
+    native = tmp_path / "incoming.ome.zarr"
+    make_zarr_v2(native)
+    sidecar = write_indexed_canonical_marker(native, source_record)
+    original_is_file = Path.is_file
+
+    def deny_biomero_folder(path):
+        # Windows has no chmod: simulate EACCES on the BIOMERO folder.
+        if path == sidecar.resolve():
+            raise PermissionError(13, "Permission denied", str(path))
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", deny_biomero_folder)
+
+    with caplog.at_level("WARNING"):
+        assert load_canonical_marker(native) is None
+
+    assert "Cannot look for canonical marker" in caplog.text
+    assert str(sidecar) in caplog.text
+
+
+def test_untraversable_biomero_folder_still_reads_legacy_sidecar(
+    tmp_path, source_record, monkeypatch
+):
+    native = tmp_path / "incoming.ome.zarr"
+    make_zarr_v2(native)
+    write_legacy_sidecar(native, source_record)
+    original_is_file = Path.is_file
+
+    def deny_biomero_folder(path):
+        if ".processed" in path.parts:
+            raise PermissionError(13, "Permission denied", str(path))
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", deny_biomero_folder)
+
+    assert load_canonical_marker(native) == CanonicalZarrSource.from_dict(
+        source_record)
+
+
+def test_removal_race_between_exists_and_unlink_is_not_an_error(
+    tmp_path, monkeypatch, caplog
+):
+    sidecar = tmp_path / ".biomero" / "x.ome.zarr.canonical.json"
+    sidecar.parent.mkdir()
+    # Another process removed the file after exists() reported it.
+    monkeypatch.setattr(Path, "exists", lambda path: path == sidecar)
+
+    with caplog.at_level("WARNING"):
+        removed = canonical_store._remove_sidecar(sidecar)
+
+    assert removed is True
+    assert "Could not remove" not in caplog.text
+
+
+@pytest.mark.parametrize("value", ["", ".", "..", "a/b", "a\\b", "../x"])
+def test_invalid_processed_folder_falls_back_with_warning(value, caplog):
+    with caplog.at_level("WARNING"):
+        folder = canonical_store.read_processed_data_folder(
+            {"PROCESSED_DATA_FOLDER": value})
+
+    assert folder == ".processed"
+    assert "Ignoring invalid PROCESSED_DATA_FOLDER" in caplog.text
+
+
+def test_absolute_processed_folder_falls_back(tmp_path, caplog):
+    folder = canonical_store.read_processed_data_folder(
+        {"PROCESSED_DATA_FOLDER": str(tmp_path)})
+
+    assert folder == ".processed"
+
+
+@pytest.mark.parametrize("environment, expected", [
+    ({}, ".processed"), ({"PROCESSED_DATA_FOLDER": "processed"}, "processed")])
+def test_valid_processed_folder_is_used(environment, expected, caplog):
+    with caplog.at_level("WARNING"):
+        assert canonical_store.read_processed_data_folder(
+            environment) == expected
+
+    assert not caplog.text
+
+
 def test_legacy_removal_tolerates_file_already_gone(tmp_path):
     native = tmp_path / "incoming.ome.zarr"
     make_zarr_v2(native)

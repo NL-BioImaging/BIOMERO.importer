@@ -35,10 +35,44 @@ CANONICAL_MARKER_NAME = ".biomero-canonical.json"
 CANONICAL_MARKER_SCHEMA = 1
 CANONICAL_METADATA_DIRECTORY = ".biomero"
 CANONICAL_MARKER_SUFFIX = ".canonical.json"
-PROCESSED_DATA_FOLDER = os.getenv(
-    "PROCESSED_DATA_FOLDER",
-    ".processed",
-)
+ENV_PROCESSED_DATA_FOLDER = "PROCESSED_DATA_FOLDER"
+DEFAULT_PROCESSED_DATA_FOLDER = ".processed"
+
+
+def read_processed_data_folder(
+    environment: Mapping[str, str] = os.environ,
+) -> str:
+    """Read and validate the BIOMERO folder name once.
+
+    The name must be a single path segment (not empty, not absolute, no
+    separators, not ``.`` or ``..``). An empty or escaping value would put
+    BIOMERO's metadata in, or outside, the user's folder, so it falls back to
+    the default with a WARNING.
+
+    Args:
+        environment (Mapping[str, str]): Environment to read.
+
+    Returns:
+        str: The folder name.
+    """
+    value = environment.get(
+        ENV_PROCESSED_DATA_FOLDER, DEFAULT_PROCESSED_DATA_FOLDER)
+    is_single_segment = (
+        bool(value)
+        and value not in {".", ".."}
+        and "\\" not in value
+        and not Path(value).is_absolute()
+        and Path(value).name == value
+    )
+    if is_single_segment:
+        return value
+    logger.warning(
+        f"Ignoring invalid {ENV_PROCESSED_DATA_FOLDER}={value!r}: it must be "
+        f"one folder name; using {DEFAULT_PROCESSED_DATA_FOLDER!r}")
+    return DEFAULT_PROCESSED_DATA_FOLDER
+
+
+PROCESSED_DATA_FOLDER = read_processed_data_folder()
 CanonicalSourceLike = Union[
     CanonicalZarrSource,
     CanonicalPlateSource,
@@ -284,9 +318,7 @@ def external_canonical_marker_path(
     Raises:
         ValueError: If the path has no name (for example a filesystem root).
     """
-    zarr_path = Path(zarr_path)
-    if not zarr_path.name:
-        raise ValueError(f"Zarr path has no name to key a sidecar: {zarr_path!r}")
+    zarr_path = _require_named(zarr_path)
     if zarr_path.parent.name == processed_folder:
         # Already inside a BIOMERO folder: do not nest .processed/.processed.
         biomero_folder = zarr_path.parent
@@ -299,15 +331,22 @@ def external_canonical_marker_path(
     )
 
 
+def _require_named(zarr_path: Union[str, Path]) -> Path:
+    """Return the path, refusing one with no name to key a sidecar by."""
+    zarr_path = Path(zarr_path)
+    if not zarr_path.name:
+        raise ValueError(
+            f"Zarr path has no name to key a sidecar: {zarr_path!r}")
+    return zarr_path
+
+
 def legacy_canonical_marker_path(zarr_path: Union[str, Path]) -> Path:
     """Return the beta location next to the input: ``<parent>/.biomero/``.
 
     Kept only to read and migrate sidecars written by earlier betas.
     BIOMERO no longer writes here.
     """
-    zarr_path = Path(zarr_path)
-    if not zarr_path.name:
-        raise ValueError(f"Zarr path has no name to key a sidecar: {zarr_path!r}")
+    zarr_path = _require_named(zarr_path)
     return (
         zarr_path.parent
         / CANONICAL_METADATA_DIRECTORY
@@ -364,19 +403,35 @@ def _find_canonical_marker_path(
     internal = zarr_path / CANONICAL_MARKER_NAME
     sidecar = external_canonical_marker_path(zarr_path, processed_folder)
     legacy = legacy_canonical_marker_path(zarr_path)
-    if internal.is_file():
+    if _is_readable_file(internal):
         logger.debug(f"Using internal canonical marker {internal}")
         return internal
-    if sidecar.is_file():
+    if _is_readable_file(sidecar):
         logger.debug(f"Using canonical sidecar {sidecar}")
         return sidecar
-    if legacy.is_file():
+    if _is_readable_file(legacy):
         logger.debug(
             f"Using legacy canonical sidecar {legacy}; it moves to the "
             f"BIOMERO folder on the next write")
         return legacy
     logger.debug(f"No canonical marker found for {zarr_path}")
     return None
+
+
+def _is_readable_file(path: Path) -> bool:
+    """Return whether a marker file exists; an unreadable folder means no.
+
+    ``Path.is_file`` raises ``PermissionError`` when a parent folder cannot be
+    traversed. A marker that cannot be reached is the same as no marker: the
+    caller falls back to the normal path, so log the reason and go on.
+    """
+    try:
+        return path.is_file()
+    except OSError as exc:
+        logger.warning(
+            f"Cannot look for canonical marker {path}: {exc}; treating it as "
+            f"absent")
+        return False
 
 
 def write_indexed_canonical_marker(
@@ -412,7 +467,8 @@ def write_indexed_canonical_marker(
         marker_path = internal
         logger.debug(f"Updating internal canonical marker {internal}")
     else:
-        marker_path = external_canonical_marker_path(zarr_path, processed_folder)
+        marker_path = external_canonical_marker_path(
+            zarr_path, processed_folder)
         logger.info(f"Writing canonical sidecar {marker_path} for {zarr_path}")
     marker = {
         "markerSchema": CANONICAL_MARKER_SCHEMA,
@@ -475,7 +531,8 @@ def remove_external_canonical_markers(
     processed_folder: str = PROCESSED_DATA_FOLDER,
 ) -> None:
     """Remove the sidecars (current and legacy) of a Zarr BIOMERO deleted."""
-    _remove_sidecar(external_canonical_marker_path(zarr_path, processed_folder))
+    _remove_sidecar(
+        external_canonical_marker_path(zarr_path, processed_folder))
     remove_legacy_canonical_marker(zarr_path, processed_folder)
 
 
@@ -498,7 +555,7 @@ def _remove_sidecar(marker_path: Path) -> bool:
 
 
 def _remove_folder_if_empty(folder: Path) -> None:
-    """Remove a folder only when nothing else is in it (``rmdir`` semantics)."""
+    """Remove a folder only if nothing else is in it (``rmdir`` semantics)."""
     try:
         folder.rmdir()
     except OSError:
@@ -536,11 +593,14 @@ def move_canonical_marker(
     )
     old_marker = next((path for path in candidates if path.is_file()), None)
     if old_marker is None:
-        logger.debug(f"No external canonical sidecar to move for {source_zarr}")
+        logger.debug(
+            f"No external canonical sidecar to move for {source_zarr}")
         return None
-    new_marker = external_canonical_marker_path(destination_zarr, processed_folder)
+    new_marker = external_canonical_marker_path(
+        destination_zarr, processed_folder)
     if new_marker == old_marker:
-        logger.debug(f"Canonical sidecar {old_marker} already at its destination")
+        logger.debug(
+            f"Canonical sidecar {old_marker} already at its destination")
         return new_marker
     if new_marker.exists():
         logger.warning(
