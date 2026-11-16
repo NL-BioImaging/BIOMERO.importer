@@ -61,10 +61,12 @@ def read_processed_data_folder(
 ) -> str:
     """Read and validate the BIOMERO folder name once.
 
-    The name must be a single path segment (not empty, not absolute, no
-    separators, not ``.`` or ``..``). An empty or escaping value would put
-    BIOMERO's metadata in, or outside, the user's folder, so it falls back to
-    the default with a WARNING.
+    Surrounding whitespace is removed, and an empty or whitespace-only value
+    counts as unset (the default, logged at DEBUG), like an empty ``VAR=``
+    line in an ``.env`` template. Otherwise the name must be a single path
+    segment (not absolute, no separators, not ``.`` or ``..``). An escaping
+    value would put BIOMERO's metadata outside the user's folder, so it falls
+    back to the default with a WARNING.
 
     Args:
         environment (Mapping[str, str]): Environment to read.
@@ -72,11 +74,14 @@ def read_processed_data_folder(
     Returns:
         str: The folder name.
     """
-    value = environment.get(
-        ENV_PROCESSED_DATA_FOLDER, DEFAULT_PROCESSED_DATA_FOLDER)
+    value = environment.get(ENV_PROCESSED_DATA_FOLDER, "").strip()
+    if not value:
+        logger.debug(
+            f"{ENV_PROCESSED_DATA_FOLDER} is not set: "
+            f"using {DEFAULT_PROCESSED_DATA_FOLDER!r}")
+        return DEFAULT_PROCESSED_DATA_FOLDER
     is_single_segment = (
-        bool(value)
-        and value not in {".", ".."}
+        value not in {".", ".."}
         and "\\" not in value
         and not Path(value).is_absolute()
         and Path(value).name == value

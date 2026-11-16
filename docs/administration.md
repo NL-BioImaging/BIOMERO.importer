@@ -48,9 +48,10 @@ The system uses these environment variables:
 - `OMERO_PORT`: OMERO server port
 - `PODMAN_USERNS_MODE`: Set to "keep-id" for Linux user namespace mapping in preprocessing
 - `PROCESSED_DATA_FOLDER`: Subfolder name for preprocessing outputs and canonical
-  Zarr storage (default: `.processed` when the variable is unset). Read when the
-  importer starts. The value is used as supplied: no leading dot is added or
-  removed. Use a non-empty relative subfolder name.
+  Zarr storage (default: `.processed` when the variable is unset or empty).
+  Read when the importer starts. Surrounding spaces are removed, and an empty or
+  spaces-only value counts as unset. Otherwise the value is used as supplied:
+  no leading dot is added or removed. Use a single relative subfolder name.
 - `USE_REGISTER_ZARR`: Set to "true" to enable zarr register script - requires omero-zarr-pixel-buffer (overrides config file setting)
 - `BIOMERO_SHALLOW_ZARR`: Opt in to the native `biomero.shallow-zarr`
   lifecycle operation. Existing orders are unchanged when false or absent.
