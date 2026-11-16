@@ -435,7 +435,7 @@ def test_invalid_processed_folder_falls_back_with_warning(value, caplog):
     assert "Ignoring invalid PROCESSED_DATA_FOLDER" in caplog.text
 
 
-@pytest.mark.parametrize("value", ["", "   ", " \r\n\u0009"])
+@pytest.mark.parametrize("value", ["", "   ", " \r\n\t"])
 def test_empty_processed_folder_is_unset_without_warning(value, caplog):
     with caplog.at_level("DEBUG"):
         folder = canonical_store.read_processed_data_folder(
@@ -443,7 +443,10 @@ def test_empty_processed_folder_is_unset_without_warning(value, caplog):
 
     assert folder == ".processed"
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
-    assert "PROCESSED_DATA_FOLDER is not set" in caplog.text
+    messages = [(r.levelname, r.getMessage()) for r in caplog.records
+                if "PROCESSED_DATA_FOLDER" in r.getMessage()]
+    assert messages == [
+        ("DEBUG", "PROCESSED_DATA_FOLDER is not set: using '.processed'")]
 
 
 def test_processed_folder_is_stripped():

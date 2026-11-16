@@ -68,7 +68,7 @@ The system uses these environment variables:
 ### Configuring the processed data folder
 
 `PROCESSED_DATA_FOLDER=processed` writes to a subfolder named `processed`;
-`PROCESSED_DATA_FOLDER=.import` writes to `.import`. Leaving the variable unset
+`PROCESSED_DATA_FOLDER=.import` writes to `.import`. Leaving the variable unset or empty
 keeps the existing `.processed` default.
 
 > [!WARNING]
