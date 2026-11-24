@@ -46,7 +46,10 @@ class ContainerStopTests(unittest.TestCase):
             state = json.loads(docker("inspect", name).stdout)[0]["State"]
             if not state["Running"]:
                 logs = docker("logs", name)
-                self.fail(f"Signal receiver exited: {state}; {logs.stdout}{logs.stderr}")
+                self.fail(
+                    f"Signal receiver exited: {state}; "
+                    f"{logs.stdout}{logs.stderr}"
+                )
             if docker("exec", name, "test", "-f", "/tmp/importer-signal-ready",
                       check=False).returncode == 0:
                 break
@@ -57,16 +60,24 @@ class ContainerStopTests(unittest.TestCase):
         docker("stop", "--time", str(STOP_TIMEOUT_SECONDS), name)
         state = json.loads(docker("inspect", name).stdout)[0]["State"]
         self.assertFalse(state["Running"])
-        self.assertEqual(state["ExitCode"], 0, "Entry point failed to stop cleanly")
+        self.assertEqual(
+            state["ExitCode"], 0, "Entry point failed to stop cleanly"
+        )
         self.assertFalse(state["OOMKilled"])
-        with tempfile.TemporaryDirectory(prefix="importer-signal-result-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="importer-signal-result-"
+        ) as directory:
             result = Path(directory) / "signal"
             docker("cp", f"{name}:/tmp/importer-stop-signal", str(result))
-            self.assertEqual(int(result.read_text(encoding="utf-8")), signal.SIGTERM)
+            self.assertEqual(
+                int(result.read_text(encoding="utf-8")), signal.SIGTERM
+            )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", required=True, help="Built importer image to test")
+    parser.add_argument(
+        "--image", required=True, help="Built importer image to test"
+    )
     ContainerStopTests.image = parser.parse_args().image
     unittest.main(argv=[sys.argv[0]], verbosity=2)
