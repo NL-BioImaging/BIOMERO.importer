@@ -1,5 +1,24 @@
 # Development and database migrations
 
+## Container stop regression
+
+Build the importer image, then exercise its default entrypoint:
+
+```sh
+docker build --build-arg BIOMERO_IMPORTER_VERSION=0.0.0 -t importer-stop-test .
+python tests/container/test_graceful_stop.py --image importer-stop-test
+```
+
+The test starts a uniquely named container with no network or production mounts. A
+small signal receiver shadows the application module while retaining the
+image's interpreter and entrypoint. It waits for readiness, runs `docker stop`,
+and requires both a recorded SIGTERM and exit code zero within the stop grace
+period. The container and copied probe files are removed afterwards. This
+isolates entrypoint forwarding from application/database startup; it does not
+test draining active imports. CI builds the full image and runs this test.
+
+## Database migrations
+
 This project uses Alembic to manage database schema changes for BIOMERO.importer's tables only. Migrations run automatically on container startup (guarded by a Postgres advisory lock) and are isolated via a per-project version table `alembic_version_omeroadi`.
 
 Below is a practical, copy-paste friendly guide to make and apply a schema change.

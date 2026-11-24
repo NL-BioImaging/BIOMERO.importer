@@ -163,5 +163,6 @@ ENV OMERODIR /opt/omero/server/OMERO.server
 # Switch to the new user for all subsequent commands
 USER autoimportuser
 
-# Set the default command or entrypoint to the main script
-ENTRYPOINT ["/opt/conda/bin/conda", "run", "-n", "auto-import-env", "python", "-m", "biomero_importer.main"]
+# Run Python as PID 1 so Docker's SIGTERM reaches the application's handler.
+# PATH already selects this environment for child commands as well.
+ENTRYPOINT ["/opt/conda/envs/auto-import-env/bin/python", "-m", "biomero_importer.main"]

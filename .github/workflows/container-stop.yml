@@ -1,0 +1,21 @@
+name: Container graceful stop
+
+on:
+  pull_request:
+    branches: [main]
+    paths: [Dockerfile, "tests/container/**", .github/workflows/container-stop.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build importer image
+        run: docker build --build-arg BIOMERO_IMPORTER_VERSION=0.0.0 -t importer-stop-test .
+      - name: Verify default entrypoint receives SIGTERM
+        run: python3 tests/container/test_graceful_stop.py --image importer-stop-test

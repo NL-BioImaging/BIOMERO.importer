@@ -143,6 +143,18 @@ docker compose logs -f biomero-importer
 
 ## Monitoring and Debugging
 
+### Container shutdown
+
+The container starts the environment's Python executable directly as PID 1.
+Docker's SIGTERM therefore reaches the application's existing shutdown handler,
+which stops polling and waits for the executor to finish. Avoid wrapping that
+entrypoint in `conda run`, which can prevent the application receiving SIGTERM.
+
+Signal delivery does not bound the duration of an active import. Check active
+work before a planned stop; a job that exceeds Docker's stop grace period can
+still be killed. The container entrypoint regression tests delivery and a clean
+idle receiver exit, not cancellation or recovery of an in-progress import.
+
 ### Log Files
 
 The system generates several log files in `/auto-importer/logs/`:
